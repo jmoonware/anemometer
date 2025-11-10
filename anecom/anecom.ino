@@ -100,11 +100,11 @@ void initial_screen() {
 void setup() {
   // put your setup code here, to run once:
 
-  Serial.begin(9600);
+//  Serial.begin(9600);
   
 // blink once when setup begins
   digitalWrite(PIN_LED, HIGH);
-  delay(100);
+  delay(300);
   digitalWrite(PIN_LED, LOW);
   delay(100);
 
@@ -159,6 +159,7 @@ void setup() {
   }
 
   // start the date time NTP updates
+  tft.println("");
   tft.println("Starting NTP updates...");
   dtntp.start();
 
