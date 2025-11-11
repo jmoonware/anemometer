@@ -1,9 +1,15 @@
 #include <WiFi.h>
 #include <NTPClient.h>
+#include <AsyncUDP_RP2040W.h>
+
 // secret, contains definition of local_ssid, local_pass, and data_url in three lines, literally: 
 // char local_ssid[] = "NNN";  //  your network SSID (name)
 // char local_pass[] = "PPP";  // your network password
 #include "/home/jmoon/Arduino/libraries/local/ssid_harvest.h"
+IPAddress static_ip(192,168,1,10);
+IPAddress static_dns(192,168,1,2);
+IPAddress static_gateway(192,168,1,1);
+IPAddress static_subnet(255,255,255,0);
 
 #include <SPI.h>
 #include <Adafruit_GFX.h>
@@ -24,12 +30,20 @@
 TFT_eSPI tft = TFT_eSPI();
 uint8_t backlight_pwm_slice;
 
-
+// NTP time stuff
 WiFiUDP ntpUDP;
 NTPClient theClient(ntpUDP);
 DateTimeNTP dtntp(&theClient);
 int wifi_status = WL_IDLE_STATUS;     // the Wifi radio's status
 
+// UDP stuff
+AsyncUDP udp;
+#define UDP_LISTEN_PORT 8225
+#define INCOMING_UDP_PACKET_SZ 64
+unsigned char incoming_packet_buf[INCOMING_UDP_PACKET_SZ];
+#define OUTGOING_UDP_PACKET_SZ 64
+unsigned char outgoing_packet_buf[OUTGOING_UDP_PACKET_SZ];
+#define INCOMING_UDP_PACKET_DATA_SZ 32
 
 elapsedMillis performance_millis;
 elapsedMillis update_millis;
@@ -62,7 +76,7 @@ int bpos[][4] = {
 
 int canvas_colors[][2] = {
   {TFT_SKYBLUE,TFT_BLACK},
-  {TFT_GREEN,TFT_BLACK},
+  {TFT_GREEN,TFT_DARKGREY},
   {TFT_GREEN,TFT_BLACK},
   {TFT_GREEN,0x01},
   {TFT_GREEN,0x01}
@@ -97,10 +111,12 @@ void initial_screen() {
 
 }
 
+
+
 void setup() {
   // put your setup code here, to run once:
 
-//  Serial.begin(9600);
+   Serial.begin(9600);
   
 // blink once when setup begins
   digitalWrite(PIN_LED, HIGH);
@@ -150,18 +166,39 @@ void setup() {
   tft.setTextColor(TFT_WHITE);
   tft.println("Connecting"); 
 
+
+
+
+  // WiFi stuff
+
+// configure static IP
+
+
+
+  WiFi.config(static_ip,static_dns, static_gateway,static_subnet);
+  // Connect to WPA/WPA2 network
+  // Just calling begin once and checking status doesn't seem to work
+  // repeatedly calling begin after a delay does work though...
   while (wifi_status != WL_CONNECTED) {
-    // Connect to WPA/WPA2 network:
     wifi_status = WiFi.begin(local_ssid,local_pass);
     tft.print('.');
-    // wait 3 seconds for connection:
-    delay(3000);
+    // wait for connection:
+    delay(1000);
   }
 
   // start the date time NTP updates
   tft.println("");
-  tft.println("Starting NTP updates...");
-  dtntp.start();
+  tft.println("Starting DateTime NTP updates...");
+  uint8_t retries = 0;
+  if (!dtntp.start()) {
+    tft.println("NTP update failed " + String(theClient.getEpochTime()));
+    while (!theClient.forceUpdate() && retries < 3) {
+      tft.print('.');
+      delay(1000);
+      retries+=1;
+    }
+  }
+  delay(1000);
 
   // x0,x1,y0,y1,ctl = [bits from LSB: 1=rotate,2=invertx,3=inverty]
   // NOTE: Calibration values are RAW extent values - which are between ~300-3600 in both X and Y
@@ -179,15 +216,124 @@ void setup() {
     canvases[i] = new GFXcanvas1(bpos[i][2],bpos[i][3]);
   }
   
-  // last but not least - reset loop update clock
+  // reset loop update clock
   update_millis = 0;
 
+  // set up UDP 
+  if(udp.listen(UDP_LISTEN_PORT)) {
+    udp.onPacket([](AsyncUDPPacket packet) {
+      parsePacket(packet);
+    });
+  }
 
 
 }
 
+
+// DEBUG STUFF - FIXME
 static int debug_counter=0;
 char debug_buf[30];
+
+enum PACKET_COMMANDS {
+  PCOMMAND_RESERVED,
+  PCOMMAND_STATUS,
+  PCOMMAND_UPTIME
+};
+
+enum PACKET_ERRORS {
+  PERR_NONE,
+  PERR_UNK_COMMAND,
+  PERR_CHECKSUM,
+  PERR_NO_ACK
+};
+
+#define ACK_BYTE 0x06
+#define NACK_BYTE 0x15
+
+static uint32_t last_packet_length = 0;
+static uint16_t last_remote_port = 0;
+static uint8_t  last_packet_error = PERR_NONE;
+static uint16_t outgoing_data_len = 0;
+static uint32_t received_packet_count = 0;
+
+void checksum_packet(unsigned char *buf, uint16_t buflen) {
+  uint16_t checksum=0;
+  for (int i=0; i < buflen-2; ++i) {
+    checksum += buf[i];
+  }
+  // last two bytes are checksum
+  buf[buflen-2]=(uint8_t)(checksum&255);
+  buf[buflen-1]=(uint8_t)(checksum>>8);
+}
+
+void parsePacket(AsyncUDPPacket packet) {
+
+    received_packet_count+=1;
+    IPAddress ip = packet.remoteIP();
+    last_remote_port = packet.remotePort();
+    last_packet_length = packet.length();
+    last_packet_error = PERR_NONE;
+
+    memcpy((uint8_t *)incoming_packet_buf, (const uint8_t *)packet.data(), packet.length());
+
+    outgoing_data_len = 0;
+    // first byte = 0x06 (ACK); last two bytes are checksum
+    if (incoming_packet_buf[0]==0x06 && last_packet_length > 2) { 
+      switch(incoming_packet_buf[1]) { // command byte
+        case PCOMMAND_STATUS:
+        {
+          outgoing_packet_buf[0]=ACK_BYTE;
+          outgoing_packet_buf[1]=PCOMMAND_STATUS;
+          // TODO: fill in dummy vals
+          outgoing_packet_buf[2]=0x00;
+          outgoing_packet_buf[3]=0x01;
+          outgoing_packet_buf[4]=0x02;
+          outgoing_packet_buf[5]=0x03;
+          outgoing_data_len=8;
+          checksum_packet(outgoing_packet_buf, outgoing_data_len);
+          break;
+        }
+        case PCOMMAND_UPTIME:
+        {
+          uint32_t uptime_secs = dtntp.last_secs-dtntp.init_secs;
+          outgoing_packet_buf[0]=ACK_BYTE;
+          outgoing_packet_buf[1]=PCOMMAND_UPTIME;
+          outgoing_packet_buf[2]=(uint8_t)(uptime_secs&255);
+          outgoing_packet_buf[3]=(uint8_t)((uptime_secs>>8)&255);
+          outgoing_packet_buf[4]=(uint8_t)((uptime_secs>>16)&255);
+          outgoing_packet_buf[5]=(uint8_t)((uptime_secs>>24)&255);
+          outgoing_data_len=8;
+          checksum_packet(outgoing_packet_buf, outgoing_data_len);
+          break;
+        }
+        default:
+        {
+          last_packet_error = PERR_UNK_COMMAND;
+          break;
+        }
+      }
+
+    }
+    else {
+      last_packet_error = PERR_NO_ACK;
+    }
+//    Serial.println("Packet " + String(received_packet_count));
+//    for(int i=0; i < packet.length();++i) {
+//      Serial.printf("%x ",incoming_packet_buf[i]);
+//    }
+
+    if (last_packet_error!=PERR_NONE) {
+      outgoing_packet_buf[0]=NACK_BYTE;  
+      outgoing_packet_buf[1]=last_packet_error;
+      outgoing_packet_buf[2]=0; // reserved
+      outgoing_packet_buf[3]=0; // reserved
+      outgoing_data_len = 4;
+    }
+
+    // alsways send response packet
+    packet.write((uint8_t*) outgoing_packet_buf, outgoing_data_len);
+}
+
 
 void loop() {
   // put your main code here, to run repeatedly:
@@ -214,6 +360,12 @@ void loop() {
       canvases[DATE_CANVAS]->setCursor(0, ycur+5);
       canvases[DATE_CANVAS]->setFont(&FreeMonoBold18pt7b);
       canvases[DATE_CANVAS]->printf("%s",dtntp.time_cstring);
+
+      canvases[T_CANVAS]->fillScreen(TFT_BLACK);
+      canvases[T_CANVAS]->setFont(&FreeMonoBold12pt7b);
+      canvases[T_CANVAS]->setCursor(5, 40);
+      canvases[T_CANVAS]->printf("P=%d, L=%d, C=%d" ,last_remote_port,last_packet_length,received_packet_count);
+
       for (int i=0; i < NUM_BITMAPS; ++i) {
           tft.drawBitmap(bpos[i][0],bpos[i][1],canvases[i]->getBuffer(),bpos[i][2],bpos[i][3],canvas_colors[i][0],canvas_colors[i][1]);
       }
@@ -231,7 +383,10 @@ void loop() {
       break;
     }
     case STATE_WAIT:
+    {
+
       break;
+    }
   }
 
 }

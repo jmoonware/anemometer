@@ -43,10 +43,12 @@ class DateTimeNTP
 {
 	public:
 		DateTimeNTP(NTPClient *client);
-		void start();
-		void get_date(uint32_t inputSecs = 0);
-		char time_cstring[20]; // [] = "00 : 00 : 00 AM EST";
-		char date_cstring[20]; // [] = "MON JAN XX, 2023";
+		bool start(); // true if successful
+		bool get_date(uint32_t inputSecs = 0);
+		char time_cstring[32]; // [] = "00 : 00 : 00 AM EST";
+		char date_cstring[32]; // [] = "MON JAN XX, 2023";
+		uint32_t init_secs;
+		uint32_t last_secs;
 
 	private:
 		NTPClient *_timeClient;

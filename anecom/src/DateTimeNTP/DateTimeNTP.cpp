@@ -1,4 +1,3 @@
-
 #include "DateTimeNTP.h"
 
 // constructor
@@ -10,13 +9,17 @@ DateTimeNTP::DateTimeNTP(NTPClient *client) {
 	this->_timeClient=client;
 }
 
-void DateTimeNTP::start() {
+bool DateTimeNTP::start() {
 
 	this->_timeClient->begin();
-	this->_timeClient->update();
 	// once an hour should be good enough
 	this->_timeClient->setUpdateInterval(1000*3600); 
-
+	// this should be true on the first call to the client
+	bool success = this->_timeClient->update();
+	// record time of start for uptime
+	this->init_secs = this->_timeClient->getEpochTime();
+	this->last_secs = this->_timeClient->getEpochTime();
+	return(success);
 }
 
 // sets month offsets for given (possibly Leap) year
@@ -91,15 +94,22 @@ uint32_t DateTimeNTP::get_year_from_days(uint32_t D) {
   return(Y);
 }
 
-void DateTimeNTP::get_date(uint32_t inputSecs) {
+bool DateTimeNTP::get_date(uint32_t inputSecs) {
 
   this->_timeClient->update();
+  bool success = true;
 
   uint32_t epochSecs = inputSecs; 
   // might have provided a timestamp for testing...
   if (epochSecs == 0) {
     epochSecs = this->_timeClient->getEpochTime();
+	// sanity check: later than around Jan 2024
+	uint32_t check_secs = (uint32_t)54*(uint32_t)3600*(uint32_t)(24*365);
+    if (epochSecs < check_secs) {
+		success=false;
+    }
   }
+  this->last_secs = epochSecs;
 
   // check for DST below  
   int16_t current_offset_minutes = this->timezone_minutes;
@@ -159,9 +169,14 @@ void DateTimeNTP::get_date(uint32_t inputSecs) {
     hours = 12; // convention
   }
 
-  sprintf(this->time_cstring,"%2d:%02d:%02d %s %s",hours,minutes,seconds,ampm,dst_name);
-  sprintf(this->date_cstring,"%s %s %2d, %4d", this->WeekDays[day_of_week_idx], this->Months[month_idx], day_of_month, this->current_year);
-
+  if (success) {
+	sprintf(this->time_cstring,"%2d:%02d:%02d %s %s",hours,minutes,seconds,ampm,dst_name);
+  	sprintf(this->date_cstring,"%s %s %2d, %4d", this->WeekDays[day_of_week_idx], this->Months[month_idx], day_of_month, this->current_year);
+  }
+  else { // use for error messages
+	sprintf(this->time_cstring,"es %x",epochSecs);
+  	sprintf(this->date_cstring,"%x %x",this->init_secs,this->last_secs); 
+  }
 //  String f_hours = (hours >= 10)?String(hours):" "+String(hours);
 //  String f_minutes = (minutes >= 10)?String(minutes):"0"+String(minutes);
 //  String f_seconds = (seconds >= 10)?String(seconds):"0"+String(seconds);
@@ -169,5 +184,5 @@ void DateTimeNTP::get_date(uint32_t inputSecs) {
 //  String date_string = WeekDays[day_of_week_idx] + " " + Months[month_idx] + " " + String(day_of_month) + ", " + String(current_year);
 
 //  return(date_string + " | " + time_string);
-
+	return success;
 }
