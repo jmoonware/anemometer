@@ -22,6 +22,8 @@ IPAddress static_subnet(255,255,255,0);
 #include <hardware/pwm.h>
 #include <elapsedMillis.h>
 
+#include <Wire.h>
+
 #include "src/DateTimeNTP/DateTimeNTP.h"
 
 // Backlight update = 133 MHz/(255*2360) = 221 Hz
@@ -29,6 +31,21 @@ IPAddress static_subnet(255,255,255,0);
 #define BACKLIGHT_TOP 2360
 TFT_eSPI tft = TFT_eSPI();
 uint8_t backlight_pwm_slice;
+
+// DEBUG STUFF - FIXME
+static int debug_counter=0;
+char debug_buf[30];
+#define DEBUG_DIR_PWM_PIN D6
+#define DEBUG_SPEED_PWM_PIN D4
+#define DEBUG_SPEED_ISR_PIN D3
+// 133/(522*255) ==> 1.0008 ms per interrupt
+#define DEBUG_SPEED_ISR_TOP 522 // clock cycles (possibly pre-divided) to generate IRQ
+#define DEBUG_SPEED_ISR_CLK_DIV 255 // pre-divide 133 MHz clock by this
+
+
+
+uint8_t dirSlice;
+uint8_t speedSlice;
 
 // NTP time stuff
 WiFiUDP ntpUDP;
@@ -111,18 +128,119 @@ void initial_screen() {
 
 }
 
+void setup_isr() {
+  // reset repeat counter
+//  stop_after=0;
+  pwm_config irqConfig = pwm_get_default_config();
+  pwm_config_set_wrap(&irqConfig, DEBUG_SPEED_ISR_TOP); // number of clock (possibly pre-divided) cycles to update isr
+  pwm_init(speedSlice, &irqConfig, true);
+//  pwm_set_chan_level(speedlice, 0, 100); // just something to look at on scope
+  irq_set_enabled(PWM_IRQ_WRAP, true);
+  pwm_set_irq_enabled(speedSlice, true);
+  pwm_clear_irq(speedSlice);
+}
 
+static uint16_t isr_high_counts = 2;
+static uint16_t isr_low_counts = 3;
+static uint16_t isr_high;
+static uint16_t isr_low;
+
+void speedIrqHandler() {
+  if (pwm_get_irq_status_mask()&(1<<speedSlice)) {
+    pwm_clear_irq(speedSlice);
+
+    if (isr_high!=0 && isr_low==0){
+      isr_high--;
+      digitalWrite(DEBUG_SPEED_ISR_PIN, HIGH); 
+      if (isr_high==0) {
+        isr_low=isr_low_counts;
+      }
+    }
+    else if (isr_high==0 && isr_low!=0) {
+      digitalWrite(DEBUG_SPEED_ISR_PIN, LOW); 
+      isr_low--;
+      if(isr_low==0) {
+        isr_high=isr_high_counts;
+      }
+    }
+    else if ( (isr_high==0 && isr_low==0) || (isr_high!=0 && isr_low !=0)) {
+      isr_high=isr_high_counts;
+      isr_low=0;
+    }
+  }
+}
 
 void setup() {
   // put your setup code here, to run once:
 
-   Serial.begin(9600);
+//   Serial.begin();
   
 // blink once when setup begins
   digitalWrite(PIN_LED, HIGH);
   delay(300);
   digitalWrite(PIN_LED, LOW);
   delay(100);
+
+  // set up GP 0, 1 for I2C communication
+  gpio_set_function(D0, GPIO_FUNC_I2C);
+  gpio_set_function(D1, GPIO_FUNC_I2C);
+  i2c_init(i2c0, 100*1000);
+
+  // set up PWM outputs for debugging - these simulate the anemometer signals
+  // "slice" is a weird name for "Counter Number" - there are 8 16 bit counters (0-7), 
+  // each having two channels (A=0,B=1) supporting two outputs with different CC values
+  pinMode(DEBUG_DIR_PWM_PIN,OUTPUT);
+  digitalWrite(DEBUG_DIR_PWM_PIN, HIGH);
+  delay(200);
+  digitalWrite(DEBUG_DIR_PWM_PIN, LOW);
+  delay(100);
+
+
+  // set up output pin for simualated reed switch pulse
+  pinMode(DEBUG_SPEED_ISR_PIN,OUTPUT);
+  digitalWrite(DEBUG_SPEED_ISR_PIN, LOW);
+
+  pinMode(DEBUG_SPEED_PWM_PIN,OUTPUT);
+  digitalWrite(DEBUG_SPEED_PWM_PIN, HIGH);
+  delay(400);
+  digitalWrite(DEBUG_SPEED_PWM_PIN, LOW);
+  delay(100);
+
+  gpio_set_function(DEBUG_DIR_PWM_PIN, GPIO_FUNC_PWM);
+  dirSlice = pwm_gpio_to_slice_num(DEBUG_DIR_PWM_PIN);
+  pwm_config dirConfig = pwm_get_default_config();
+  // 133 MHz/256 = 519.5 kHz with 256 different levels
+  pwm_config_set_wrap(&dirConfig, 256);
+  pwm_init(dirSlice, &dirConfig, true);
+  pwm_set_enabled(dirSlice,true);
+  pwm_set_chan_level(dirSlice, 0, 100);
+//  pwm_set_clkdiv_int_frac(dirSlice, 1, 0);
+
+//  pinMode(DEBUG_SPEED_PWM_PIN,OUTPUT);
+//  digitalWrite(DEBUG_SPEED_PWM_PIN, HIGH);
+//  delay(300);
+//  digitalWrite(DEBUG_SPEED_PWM_PIN, LOW);
+//  delay(100);
+
+  gpio_set_function(DEBUG_SPEED_PWM_PIN, GPIO_FUNC_PWM);
+  speedSlice = pwm_gpio_to_slice_num(DEBUG_SPEED_PWM_PIN);
+
+  // Note: 133 MHz/255 = 561.6 kHz
+  // at 65535 top = 7.96 Hz
+  pwm_config speedConfig = pwm_get_default_config();
+  pwm_config_set_wrap(&speedConfig, DEBUG_SPEED_ISR_TOP);
+  pwm_init(speedSlice, &speedConfig, true);
+  pwm_set_enabled(speedSlice,true);
+  pwm_set_chan_level(speedSlice, 0, 25);
+  // reduce base clock to ~500 kHz
+  pwm_set_clkdiv_int_frac(speedSlice, DEBUG_SPEED_ISR_CLK_DIV, 0);
+  isr_high = isr_high_counts;
+  isr_low=0;
+  irq_add_shared_handler(PWM_IRQ_WRAP, speedIrqHandler,PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
+// setup_isr();
+  irq_set_enabled(PWM_IRQ_WRAP, true);
+  pwm_set_irq_enabled(speedSlice, true);
+  pwm_clear_irq(speedSlice);
 
 // nothing was coming out of pins from scope so had to do this manually
   gpio_set_function(TFT_CS, GPIO_FUNC_SPI);
@@ -230,21 +348,22 @@ void setup() {
 }
 
 
-// DEBUG STUFF - FIXME
-static int debug_counter=0;
-char debug_buf[30];
+
 
 enum PACKET_COMMANDS {
   PCOMMAND_RESERVED,
   PCOMMAND_STATUS,
-  PCOMMAND_UPTIME
+  PCOMMAND_UPTIME,
+  PCOMMAND_SET_ISR_LOW_COUNT,
+  PCOMMAND_SET_ISR_HIGH_COUNT
 };
 
 enum PACKET_ERRORS {
   PERR_NONE,
   PERR_UNK_COMMAND,
   PERR_CHECKSUM,
-  PERR_NO_ACK
+  PERR_NO_ACK,
+  PERR_COUNT_RANGE
 };
 
 #define ACK_BYTE 0x06
@@ -306,6 +425,37 @@ void parsePacket(AsyncUDPPacket packet) {
           checksum_packet(outgoing_packet_buf, outgoing_data_len);
           break;
         }
+        case PCOMMAND_SET_ISR_LOW_COUNT:
+        {
+          uint16_t tcount = (uint16_t)incoming_packet_buf[2]+(((uint16_t)incoming_packet_buf[3])<<8);
+          outgoing_packet_buf[0]=ACK_BYTE;
+          outgoing_packet_buf[1]=PCOMMAND_SET_ISR_LOW_COUNT;
+          outgoing_packet_buf[2]=(uint8_t)(tcount&255);
+          outgoing_packet_buf[3]=(uint8_t)((tcount>>8)&255);
+          outgoing_data_len=6;
+          checksum_packet(outgoing_packet_buf, outgoing_data_len);
+          if (tcount > 0 && tcount < 5000) { // 5 s max
+            isr_low_counts = tcount;
+          }
+          else last_packet_error = PERR_COUNT_RANGE;
+          break;
+        }
+        case PCOMMAND_SET_ISR_HIGH_COUNT:
+        {
+          uint16_t tcount = (uint16_t)incoming_packet_buf[2]+(((uint16_t)incoming_packet_buf[3])<<8);
+          outgoing_packet_buf[0]=ACK_BYTE;
+          outgoing_packet_buf[1]=PCOMMAND_SET_ISR_HIGH_COUNT;
+          outgoing_packet_buf[2]=(uint8_t)(tcount&255);
+          outgoing_packet_buf[3]=(uint8_t)((tcount>>8)&255);
+          outgoing_data_len=6;
+          checksum_packet(outgoing_packet_buf, outgoing_data_len);
+          if (tcount > 0 && tcount < 5000) { // 5 s max
+            isr_high_counts = tcount;
+          }
+          else last_packet_error = PERR_COUNT_RANGE; 
+
+          break;
+        }
         default:
         {
           last_packet_error = PERR_UNK_COMMAND;
@@ -365,6 +515,13 @@ void loop() {
       canvases[T_CANVAS]->setFont(&FreeMonoBold12pt7b);
       canvases[T_CANVAS]->setCursor(5, 40);
       canvases[T_CANVAS]->printf("P=%d, L=%d, C=%d" ,last_remote_port,last_packet_length,received_packet_count);
+
+      canvases[H_CANVAS]->fillScreen(TFT_BLACK);
+      canvases[H_CANVAS]->setFont(&FreeMonoBold12pt7b);
+      canvases[H_CANVAS]->setCursor(5, 40);
+      canvases[H_CANVAS]->printf("dir=%d, speed=%d",dirSlice,speedSlice);
+
+//      Serial.println("Dir slice = " + String(dirSlice));
 
       for (int i=0; i < NUM_BITMAPS; ++i) {
           tft.drawBitmap(bpos[i][0],bpos[i][1],canvases[i]->getBuffer(),bpos[i][2],bpos[i][3],canvas_colors[i][0],canvas_colors[i][1]);
