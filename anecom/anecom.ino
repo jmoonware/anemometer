@@ -61,8 +61,8 @@ uint8_t speedSlice;
 
 // NTP time stuff
 WiFiUDP ntpUDP;
-NTPClient theClient(ntpUDP);
-DateTimeNTP dtntp(&theClient);
+NTPClient theNTPUDPClient(ntpUDP);
+DateTimeNTP dtntp(&theNTPUDPClient);
 int wifi_status = WL_IDLE_STATUS;     // the Wifi radio's status
 
 // UDP stuff
@@ -347,17 +347,28 @@ void setup() {
   }
 
   // start the date time NTP updates
+  # define NTP_RETRIES 3 
   tft.println("");
   tft.println("Starting DateTime NTP updates...");
   uint8_t retries = 0;
-  if (!dtntp.start()) {
-    tft.println("NTP update failed " + String(theClient.getEpochTime()));
-    while (!theClient.forceUpdate() && retries < 3) {
-      tft.print('.');
+  //   tft.println("NTP update failed " + String(theNTPUDPClient.getEpochTime()));
+  while (!dtntp.start() && retries < NTP_RETRIES) {
+    tft.print('.');
+    wifi_status = WiFi.disconnect();
+    while (wifi_status != WL_CONNECTED) {
+      WiFi.config(static_ip,static_dns, static_gateway,static_subnet);
+      wifi_status = WiFi.begin(local_ssid,local_pass);
+      tft.print('#');
+      // wait for connection:
       delay(1000);
-      retries+=1;
     }
+    delay(1000);
+    retries+=1;
   }
+  if (retries==NTP_RETRIES) {
+    tft.print("Cannot start NTP service");
+  }
+
   delay(1000);
 
   tft.println("");
