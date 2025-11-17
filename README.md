@@ -1,15 +1,12 @@
 # Anemometer Project 
 Code for a WiFi sensor and communicator for a [Davis anemometer](https://www.davisinstruments.com/collections/anemometers/products/anemometer-for-vantage-pro2-vantage-pro).
 
-This project uses a pair of RP2040's:
+This project uses a Pico W board [RP2040 Pico W](https://www.waveshare.com/raspberry-pi-pico-w.htm) connected to a [Waveshare Pico-Res Touch 3.5 inch touch LCD display](https://www.waveshare.com/wiki/Pico-ResTouch-LCD-3.5) 
 
-1. *The Communicator*: A [RP2040 Pico W](https://www.waveshare.com/raspberry-pi-pico-w.htm) connected to a [Waveshare Pico-Res Touch 3.5 inch touch LCD display](https://www.waveshare.com/wiki/Pico-ResTouch-LCD-3.5) 
-2. *The Sensor*: A [Seeeduino Xiao](https://wiki.seeedstudio.com/Seeeduino-XIAO/) RP2040 which handles the real-time interrupts from the spinning wind gauge switch, and the analog sensing of the wind direction. 
-
-The Pico W Communicator sits on a local WiFi network and will send out a sensor data on request. Additionally, the Communicator drives the display (in this case, showing wind speed and direction, amongst other things.)
-
-The Communicator and Sensor are connected via I2C. The Communicator reads out the Sensor's I2C registers; obviously other sensors can be connected to the I2C bus as well.
+The Pico W is ridiculously powerful for a simple WiFi-connected data logger. It can easily service real-time-ish interrupts while communicating over UDP with some other computer (as well as using the I2C bus.)
 
 The electronics are enclosed in a waterproof box with a transparent lid to see the display, powered by a local 5V/3A wall-adapter.
+
+The layout and circuit for the glue board are also included here. There are provisions for I2C devices, a Davis Anemometer, and a 5V servo motor (such as the MG 996R.) There are also a couple of jumpers that can be configured in "debug mode" where the Pico itself simulates the signals that should come from the anemometer (basically, the wind direction 0-3.3 V analog level, and the wind speed reed switch which produces digital pulses at 0 - ~1kHz.)  
 
 

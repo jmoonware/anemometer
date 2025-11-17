@@ -13,6 +13,7 @@ ap.add_argument('-c','--command',help='Packet command byte',required=False,defau
 ap.add_argument('-cv','--command_values',help='Command payload values (series of comma separated hex byte values',required=False,default="")
 ap.add_argument('-b','--base',help='Interpret command payload values as this base 16 is default, 10 is most likely other value ',required=False,default=16)
 ap.add_argument('-a','--ackbyte',help='Packet ack byte (for testing)',required=False,default=ACK)
+ap.add_argument('-t','--timeout',help='Timeout in seconds (float format)',required=False,default="5.0")
 
 clargs = ap.parse_args(sys.argv[1:])
 
@@ -41,16 +42,24 @@ payload.append(outgoing_checksum&255)
 payload.append(outgoing_checksum>>8)
 
 destination_addr = (clargs.dest,int(clargs.port))
-sock.sendto(payload,destination_addr)
+sock.settimeout(float(clargs.timeout))
+try:
+	sock.sendto(payload,destination_addr)
+	rec_msg, sender = sock.recvfrom(4096)
+except socket.timeout as to:
+	print("Timeout after {0} s".format(float(clargs.timeout)))
+	sys.exit(1)
 
-rec_msg, sender = sock.recvfrom(4096)
 print("Sent: {0}".format(' '.join(['{0:x}'.format(x) for x in payload])))
 print("Received: {0}".format(' '.join(['{0:x}'.format(x) for x in rec_msg])))
 
 # validate checksum if needed
 if rec_msg[0]==ACK and len(rec_msg) > 2:
-	computed_checksum = sum(rec_msg[:-2])
-	received_checksum = rec_msg[-2]+(rec_msg[-1]>>8)
+	computed_checksum = 0;
+	for x in rec_msg[:-2]:
+		computed_checksum += int(x)
+
+	received_checksum = int(rec_msg[-2])+(int(rec_msg[-1])<<8)
 	if received_checksum!=computed_checksum:
 		print("Bad checksum: Received {0} vs Computed {1}".format(received_checksum,computed_checksum))
 	else:

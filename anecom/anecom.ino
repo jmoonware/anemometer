@@ -1,6 +1,7 @@
 #include <WiFi.h>
 #include <NTPClient.h>
 #include <AsyncUDP_RP2040W.h>
+#include <Adafruit_BME280.h>
 
 // secret, contains definition of local_ssid, local_pass, and data_url in three lines, literally: 
 // char local_ssid[] = "NNN";  //  your network SSID (name)
@@ -35,17 +36,28 @@ uint8_t backlight_pwm_slice;
 // DEBUG STUFF - FIXME
 static int debug_counter=0;
 char debug_buf[30];
-#define DEBUG_DIR_PWM_PIN D6
-#define DEBUG_SPEED_PWM_PIN D4
-#define DEBUG_SPEED_ISR_PIN D3
+// here "physical pin" means pins 1-40 of the Pico W board
+#define DEBUG_DIR_PWM_PIN D6 // physical pin 9
+#define DEBUG_SPEED_PWM_PIN D4 // physical pin 6
+#define DEBUG_SPEED_ISR_PIN D3 // physical pin 5
 // 133/(522*255) ==> 1.0008 ms per interrupt
 #define DEBUG_SPEED_ISR_TOP 522 // clock cycles (possibly pre-divided) to generate IRQ
 #define DEBUG_SPEED_ISR_CLK_DIV 255 // pre-divide 133 MHz clock by this
+#define DEBUG_DAC_TOP 1024 // clock cycles (possibly pre-divided) to generate IRQ
 
+#define PICOW_CLK_FREQ 133000000
+#define MOTOR_TOP 10431 // with 255 clk div is 50 Hz (20 ms period)
+#define MOTOR_CLK_DIV 255
 
 
 uint8_t dirSlice;
 uint8_t speedSlice;
+
+// pins for actual sensor
+#define WIND_DIR_PIN D27 // A1, physical pin 32
+#define WIND_SPEED_PIN D26 // A0, physical pin 31
+#define ADC_GROUND 33 // physical pin 33; just listed for reference
+
 
 // NTP time stuff
 WiFiUDP ntpUDP;
@@ -62,9 +74,14 @@ unsigned char incoming_packet_buf[INCOMING_UDP_PACKET_SZ];
 unsigned char outgoing_packet_buf[OUTGOING_UDP_PACKET_SZ];
 #define INCOMING_UDP_PACKET_DATA_SZ 32
 
-elapsedMillis performance_millis;
+elapsedMillis rotor_millis;
 elapsedMillis update_millis;
-uint32_t update_delay = 2*1000; // ms, for raw sensor data
+elapsedMillis motor_millis;
+// stop motor after this many milliseconds
+#define MOTOR_MOVING_MILLIS 3000
+bool motor_is_moving;
+
+uint32_t update_delay = 1*1000; // ms, for raw sensor data
 
 enum GIZMO_STATES {
   STATE_UPDATE,
@@ -170,30 +187,73 @@ void speedIrqHandler() {
   }
 }
 
+static uint32_t last_rotor_interrupt = 0; // elampsed millisecs
+static bool rotor_wait = false;
+#define ROTOR_WAIT 65535 // if we never got a trigger then value isn't valid
+static int last_vane_reading = 0;
+static float last_board_T = -1;
+
+Adafruit_BME280 theBME280; // = Adafruit_BME280();
+static float last_bme280_temperature;
+static float last_bme280_humidity;
+static float last_bme_280_pressure;
+void read_bme280() 
+{
+  last_bme280_temperature = theBME280.readTemperature();
+}
+
+
+void read_board_T() {
+  last_board_T = analogReadTemp();
+}
+
+// measure analog voltage
+void read_vane() {
+  last_vane_reading = analogRead(WIND_DIR_PIN);
+}
+
+// measure elapsed millisecs from last edge trigger (from anemometer reed switch)
+void read_speed() {
+  if (rotor_wait) last_rotor_interrupt = ROTOR_WAIT;
+  // reset every 5 s if no rotor pulses
+  if (last_rotor_interrupt > 5000) rotor_millis =0;
+  rotor_wait = true;
+}
+
+// measure time
+void rotorIsr() {
+  rotor_wait = false;
+  last_rotor_interrupt = rotor_millis;
+  rotor_millis = 0;
+}
+
+
+TwoWire theWire(i2c0,D0,D1);
+
 void setup() {
   // put your setup code here, to run once:
 
-//   Serial.begin();
+  Serial.begin(9600);
   
-// blink once when setup begins
+  // blink once when setup begins
   digitalWrite(PIN_LED, HIGH);
   delay(300);
   digitalWrite(PIN_LED, LOW);
   delay(100);
 
-  // set up GP 0, 1 for I2C communication
-  gpio_set_function(D0, GPIO_FUNC_I2C);
-  gpio_set_function(D1, GPIO_FUNC_I2C);
-  i2c_init(i2c0, 100*1000);
+  // set up sensor pins for wind measurement
+  // gpio_set_dir(WIND_DIR_PIN, INPUT);
+  pinMode(WIND_DIR_PIN, INPUT);
+
+  pinMode(WIND_SPEED_PIN,INPUT);
+  attachInterrupt(WIND_SPEED_PIN,rotorIsr,FALLING);
 
   // set up PWM outputs for debugging - these simulate the anemometer signals
   // "slice" is a weird name for "Counter Number" - there are 8 16 bit counters (0-7), 
   // each having two channels (A=0,B=1) supporting two outputs with different CC values
   pinMode(DEBUG_DIR_PWM_PIN,OUTPUT);
-  digitalWrite(DEBUG_DIR_PWM_PIN, HIGH);
-  delay(200);
   digitalWrite(DEBUG_DIR_PWM_PIN, LOW);
-  delay(100);
+//  delay(100);
 
 
   // set up output pin for simualated reed switch pulse
@@ -210,17 +270,10 @@ void setup() {
   dirSlice = pwm_gpio_to_slice_num(DEBUG_DIR_PWM_PIN);
   pwm_config dirConfig = pwm_get_default_config();
   // 133 MHz/256 = 519.5 kHz with 256 different levels
-  pwm_config_set_wrap(&dirConfig, 256);
+  pwm_config_set_wrap(&dirConfig, DEBUG_DAC_TOP);
   pwm_init(dirSlice, &dirConfig, true);
-  pwm_set_enabled(dirSlice,true);
-  pwm_set_chan_level(dirSlice, 0, 100);
-//  pwm_set_clkdiv_int_frac(dirSlice, 1, 0);
-
-//  pinMode(DEBUG_SPEED_PWM_PIN,OUTPUT);
-//  digitalWrite(DEBUG_SPEED_PWM_PIN, HIGH);
-//  delay(300);
-//  digitalWrite(DEBUG_SPEED_PWM_PIN, LOW);
-//  delay(100);
+  pwm_set_enabled(dirSlice,false);
+  pwm_set_chan_level(dirSlice, 0, DEBUG_DAC_TOP/3);
 
   gpio_set_function(DEBUG_SPEED_PWM_PIN, GPIO_FUNC_PWM);
   speedSlice = pwm_gpio_to_slice_num(DEBUG_SPEED_PWM_PIN);
@@ -237,7 +290,6 @@ void setup() {
   isr_high = isr_high_counts;
   isr_low=0;
   irq_add_shared_handler(PWM_IRQ_WRAP, speedIrqHandler,PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
-// setup_isr();
   irq_set_enabled(PWM_IRQ_WRAP, true);
   pwm_set_irq_enabled(speedSlice, true);
   pwm_clear_irq(speedSlice);
@@ -265,33 +317,23 @@ void setup() {
   tft.fillScreen((TFT_BLACK));
 
 
-// DO NOT use the Adafruit_GFX fonts! 
-//  tft.setFreeFont(&FreeSerif9pt7b); 
+  // DO NOT use the Adafruit_GFX fonts! 
+  //  tft.setFreeFont(&FreeSerif9pt7b); 
   tft.setTextFont(2);
   tft.setTextSize(2);
-
 //  tft.setCursor(20, 0, 2);
   tft.setTextColor(TFT_SKYBLUE);
   tft.println(" ");
   tft.println("Hello!");
-
   tft.setTextColor(TFT_GREEN); 
   tft.println("Hello!");
-
   tft.setTextColor(TFT_RED); 
   tft.println("Hello!");
-  
   tft.setTextColor(TFT_WHITE);
   tft.println("Connecting"); 
 
-
-
-
   // WiFi stuff
-
-// configure static IP
-
-
+  // configure static IP
 
   WiFi.config(static_ip,static_dns, static_gateway,static_subnet);
   // Connect to WPA/WPA2 network
@@ -318,6 +360,24 @@ void setup() {
   }
   delay(1000);
 
+  tft.println("");
+  tft.println("Init BME280 THP dev...");
+
+  unsigned bme_status = theBME280.begin(0x76,&theWire);
+  tft.println("BME280 status = "+String(bme_status));
+  delay(1000);
+  if (!bme_status) {
+    bme_status = theBME280.begin(0x77,&theWire);
+    tft.println("BME280 status = "+String(bme_status));
+    delay(1000);
+  }
+  if(!bme_status) {
+    bme_status = theBME280.begin(0x76,&theWire);
+    tft.println("BME280 status = "+String(bme_status));
+    delay(1000);
+  }
+
+
   // x0,x1,y0,y1,ctl = [bits from LSB: 1=rotate,2=invertx,3=inverty]
   // NOTE: Calibration values are RAW extent values - which are between ~300-3600 in both X and Y
   uint16_t calibrationData[5] = {300,3600,300,3600,0};
@@ -336,6 +396,9 @@ void setup() {
   
   // reset loop update clock
   update_millis = 0;
+  rotor_millis  = 0;
+  motor_millis = 0;
+  motor_is_moving = false;
 
   // set up UDP 
   if(udp.listen(UDP_LISTEN_PORT)) {
@@ -354,9 +417,20 @@ enum PACKET_COMMANDS {
   PCOMMAND_RESERVED,
   PCOMMAND_STATUS,
   PCOMMAND_UPTIME,
+  PCOMMAND_READ_DIR_AD_RAW,
+  PCOMMAND_READ_SPEED_TIMER_RAW,
+  PCOMMAND_READ_BME_TEMP,
+  PCOMMAND_NUM_READ_COMMANDS,
+  PCOMMAND_READ_BOARD_T, 
   PCOMMAND_SET_ISR_LOW_COUNT,
-  PCOMMAND_SET_ISR_HIGH_COUNT
+  PCOMMAND_SET_ISR_HIGH_COUNT,
+  PCOMMAND_SET_DAC_LEVEL, 
+  PCOMMAND_SET_MOTOR_POSITION
 };
+
+// this buffer holds the latest uint16 values that can be read
+uint16_t read_values[PCOMMAND_NUM_READ_COMMANDS];
+
 
 enum PACKET_ERRORS {
   PERR_NONE,
@@ -383,6 +457,10 @@ void checksum_packet(unsigned char *buf, uint16_t buflen) {
   // last two bytes are checksum
   buf[buflen-2]=(uint8_t)(checksum&255);
   buf[buflen-1]=(uint8_t)(checksum>>8);
+}
+
+void buildPacket(int command, uint64_t val,uint8_t bytes = 2) {
+
 }
 
 void parsePacket(AsyncUDPPacket packet) {
@@ -425,6 +503,48 @@ void parsePacket(AsyncUDPPacket packet) {
           checksum_packet(outgoing_packet_buf, outgoing_data_len);
           break;
         }
+        case PCOMMAND_READ_DIR_AD_RAW:
+        {
+          outgoing_packet_buf[0]=ACK_BYTE;
+          outgoing_packet_buf[1]=PCOMMAND_READ_DIR_AD_RAW;
+          outgoing_packet_buf[2]=(uint8_t)(last_vane_reading&255);
+          outgoing_packet_buf[3]=(uint8_t)((last_vane_reading>>8)&255);
+          outgoing_data_len=6;
+          checksum_packet(outgoing_packet_buf, outgoing_data_len);
+          break;
+        }
+        case PCOMMAND_READ_SPEED_TIMER_RAW:
+        {
+          outgoing_packet_buf[0]=ACK_BYTE;
+          outgoing_packet_buf[1]=PCOMMAND_READ_SPEED_TIMER_RAW;
+          outgoing_packet_buf[2]=(uint8_t)(last_rotor_interrupt&255);
+          outgoing_packet_buf[3]=(uint8_t)((last_rotor_interrupt>>8)&255);
+          outgoing_data_len=6;
+          checksum_packet(outgoing_packet_buf, outgoing_data_len);
+          break;
+        }
+        case PCOMMAND_READ_BOARD_T:
+        {
+          outgoing_packet_buf[0]=ACK_BYTE;
+          outgoing_packet_buf[1]=PCOMMAND_READ_BOARD_T;
+          int16_t scaled_T = (int16_t)(last_board_T*10);
+          outgoing_packet_buf[2]=(uint8_t)(scaled_T&255);
+          outgoing_packet_buf[3]=(uint8_t)((scaled_T>>8)&255);
+          outgoing_data_len=6;
+          checksum_packet(outgoing_packet_buf, outgoing_data_len);
+          break;
+        }
+        case PCOMMAND_READ_BME_TEMP:
+        {
+          outgoing_packet_buf[0]=ACK_BYTE;
+          outgoing_packet_buf[1]=PCOMMAND_READ_BME_TEMP;
+          int16_t scaled_T = (int16_t)(last_bme280_temperature*10);
+          outgoing_packet_buf[2]=(uint8_t)(scaled_T&255);
+          outgoing_packet_buf[3]=(uint8_t)((scaled_T>>8)&255);
+          outgoing_data_len=6;
+          checksum_packet(outgoing_packet_buf, outgoing_data_len);
+          break;
+        }
         case PCOMMAND_SET_ISR_LOW_COUNT:
         {
           uint16_t tcount = (uint16_t)incoming_packet_buf[2]+(((uint16_t)incoming_packet_buf[3])<<8);
@@ -451,6 +571,52 @@ void parsePacket(AsyncUDPPacket packet) {
           checksum_packet(outgoing_packet_buf, outgoing_data_len);
           if (tcount > 0 && tcount < 5000) { // 5 s max
             isr_high_counts = tcount;
+          }
+          else last_packet_error = PERR_COUNT_RANGE; 
+
+          break;
+        }
+        case PCOMMAND_SET_DAC_LEVEL:
+        {
+          uint16_t tcount = (uint16_t)incoming_packet_buf[2]+(((uint16_t)incoming_packet_buf[3])<<8);
+          outgoing_packet_buf[0]=ACK_BYTE;
+          outgoing_packet_buf[1]=PCOMMAND_SET_DAC_LEVEL;
+          outgoing_packet_buf[2]=(uint8_t)(tcount&255);
+          outgoing_packet_buf[3]=(uint8_t)((tcount>>8)&255);
+          outgoing_data_len=6;
+          checksum_packet(outgoing_packet_buf, outgoing_data_len);
+          if (tcount < DEBUG_DAC_TOP) { 
+             pwm_set_chan_level(dirSlice, 0, tcount);
+          }
+          else last_packet_error = PERR_COUNT_RANGE; 
+
+          break;
+        }
+        case PCOMMAND_SET_MOTOR_POSITION:
+        {
+          uint16_t tcount = (uint16_t)incoming_packet_buf[2]+(((uint16_t)incoming_packet_buf[3])<<8);
+          outgoing_packet_buf[0]=ACK_BYTE;
+          outgoing_packet_buf[1]=PCOMMAND_SET_MOTOR_POSITION;
+          outgoing_packet_buf[2]=(uint8_t)(tcount&255);
+          outgoing_packet_buf[3]=(uint8_t)((tcount>>8)&255);
+          outgoing_data_len=6;
+          checksum_packet(outgoing_packet_buf, outgoing_data_len);
+          if (tcount <= 180) {
+              gpio_set_function(DEBUG_DIR_PWM_PIN, GPIO_FUNC_PWM);
+              pwm_set_enabled(dirSlice, true);
+              pwm_config dirConfig = pwm_get_default_config();
+              pwm_config_set_wrap(&dirConfig, MOTOR_TOP);
+              pwm_config_set_clkdiv(&dirConfig, MOTOR_CLK_DIV);
+              pwm_init(dirSlice, &dirConfig, true);
+              // map 0-180 degrees to 1-2 ms level
+              float time_to_top = ((float)MOTOR_TOP*(float)MOTOR_CLK_DIV)/(float)PICOW_CLK_FREQ;
+              float one_ms_level = (0.001/time_to_top)*MOTOR_TOP; // pwm_level for for one ms pulse
+              float frac = (float)tcount/180.0; // fraction of half-rotation
+              float motor_width = one_ms_level*frac; 
+              uint16_t motor_level = (uint16_t)(motor_width + one_ms_level);
+              pwm_set_chan_level(dirSlice, 0, motor_level);
+              motor_millis=0;
+              motor_is_moving = true;
           }
           else last_packet_error = PERR_COUNT_RANGE; 
 
@@ -497,9 +663,23 @@ void loop() {
     gizmo_state = STATE_WAIT;
   }
 
+  if(motor_millis > MOTOR_MOVING_MILLIS & motor_is_moving) {
+    pwm_set_enabled(dirSlice, false);
+    digitalWrite(DEBUG_DIR_PWM_PIN, LOW);
+    motor_is_moving = false;
+  }
+
+
+
   switch (gizmo_state) {
     case STATE_UPDATE:
     {
+      // update sensor values
+      read_board_T();
+      read_vane();
+      read_speed();
+      read_bme280();
+
        // update date/time first
       dtntp.get_date();
       canvases[DATE_CANVAS]->fillScreen(TFT_BLACK);
@@ -514,12 +694,12 @@ void loop() {
       canvases[T_CANVAS]->fillScreen(TFT_BLACK);
       canvases[T_CANVAS]->setFont(&FreeMonoBold12pt7b);
       canvases[T_CANVAS]->setCursor(5, 40);
-      canvases[T_CANVAS]->printf("P=%d, L=%d, C=%d" ,last_remote_port,last_packet_length,received_packet_count);
+      canvases[T_CANVAS]->printf("T=%.1f, L=%d, C=%d" ,last_bme280_temperature,last_packet_length,received_packet_count);
 
       canvases[H_CANVAS]->fillScreen(TFT_BLACK);
       canvases[H_CANVAS]->setFont(&FreeMonoBold12pt7b);
       canvases[H_CANVAS]->setCursor(5, 40);
-      canvases[H_CANVAS]->printf("dir=%d, speed=%d",dirSlice,speedSlice);
+      canvases[H_CANVAS]->printf("d=%d, s=%d, m=%d",last_vane_reading,last_rotor_interrupt,(motor_is_moving?1:0));
 
 //      Serial.println("Dir slice = " + String(dirSlice));
 
