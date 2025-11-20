@@ -439,7 +439,7 @@ void setup() {
   // start the date time NTP updates
   # define NTP_RETRIES 3 
   tft.println("");
-  tft.println("Starting DateTime NTP updates...");
+  tft.println("Starting NTP...");
   uint8_t retries = 0;
   //   tft.println("NTP update failed " + String(theNTPUDPClient.getEpochTime()));
   while (!dtntp.start() && retries < NTP_RETRIES) {
@@ -730,10 +730,11 @@ void parsePacket(AsyncUDPPacket packet) {
                 pwm_set_enabled(dirSlice,false);
               }
               else {
+                gpio_set_function(DEBUG_DIR_PWM_PIN, GPIO_FUNC_PWM);
                 pwm_config dirConfig = pwm_get_default_config();
                 pwm_config_set_wrap(&dirConfig, DEBUG_DAC_TOP);
                 pwm_config_set_clkdiv(&dirConfig, DEBUG_DAC_CLK_DIV);
-                pwm_init(dirSlice, &dirConfig, true);   
+                pwm_init(dirSlice, &dirConfig, false);   
                 pwm_set_chan_level(dirSlice, 0, tcount);
                 pwm_set_enabled(dirSlice, true);
               }
