@@ -26,6 +26,7 @@ IPAddress static_subnet(255,255,255,0);
 #include <Wire.h>
 
 #include "src/DateTimeNTP/DateTimeNTP.h"
+#include "src/windcal.h"
 
 // Backlight update = 133 MHz/(255*2360) = 221 Hz
 #define BACKLIGHT_DIV 255
@@ -49,7 +50,7 @@ char debug_buf[30];
 #define MOTOR_TOP 10431 // with 255 clk div is 50 Hz (20 ms period)
 #define MOTOR_CLK_DIV 255
 
-
+// pwm counters used in debug/motor control
 uint8_t dirSlice;
 uint8_t speedSlice;
 
@@ -57,7 +58,6 @@ uint8_t speedSlice;
 #define WIND_DIR_PIN D27 // A1, physical pin 32
 #define WIND_SPEED_PIN D26 // A0, physical pin 31
 #define ADC_GROUND 33 // physical pin 33; just listed for reference
-
 
 // NTP time stuff
 WiFiUDP ntpUDP;
@@ -76,10 +76,6 @@ unsigned char outgoing_packet_buf[OUTGOING_UDP_PACKET_SZ];
 
 elapsedMillis rotor_millis;
 elapsedMillis update_millis;
-elapsedMillis motor_millis;
-// stop motor after this many milliseconds
-#define MOTOR_MOVING_MILLIS 3000
-bool motor_is_moving;
 
 uint32_t update_delay = 1*1000; // ms, for raw sensor data
 
@@ -93,27 +89,53 @@ enum BITMAP_NAMES {
   DATE_CANVAS,
   T_CANVAS,
   H_CANVAS,
+  P_CANVAS,
   WINDV_CANVAS,
   WINDA_CANVAS,
   NUM_BITMAPS
 };
 
-GFXcanvas1 *canvases[NUM_BITMAPS]; 
+GFXcanvas1 *label_canvases[NUM_BITMAPS]; 
+GFXcanvas1 *data_canvases[NUM_BITMAPS]; 
 
-int bpos[][4] = {
+#define LABEL_WIDTH 150
+#define LABEL_OFFSET 35
+
+int data_pos[][4] = {
   {0,0,320,50}, // x, y, w, h; date
-  {0,70,320,50}, // temp
-  {0,120,320,50}, // hum
-  {0,200,320,55}, // wind v
-  {0,255,320,50}, // wind angle
+  {LABEL_WIDTH,70,320-LABEL_WIDTH,50}, // temp
+  {LABEL_WIDTH,120,320-LABEL_WIDTH,50}, // hum
+  {LABEL_WIDTH,170,320-LABEL_WIDTH,50}, // pressure
+  {LABEL_WIDTH,220,320-LABEL_WIDTH,50}, // wind v
+  {LABEL_WIDTH,270,320-LABEL_WIDTH,50}, // wind angle
 };
 
-int canvas_colors[][2] = {
+int label_pos[][4] = {
+  {0,0,320,50}, // x, y, w, h; date
+  {0,70,LABEL_WIDTH,50}, // temp
+  {0,120,LABEL_WIDTH,50}, // hum
+  {0,170,LABEL_WIDTH,50}, // pressure
+  {0,220,LABEL_WIDTH,50}, // wind v
+  {0,270,LABEL_WIDTH,50}, // wind angle
+};
+
+// text color, background color
+int label_canvas_colors[][2] = {
   {TFT_SKYBLUE,TFT_BLACK},
   {TFT_GREEN,TFT_DARKGREY},
   {TFT_GREEN,TFT_BLACK},
-  {TFT_GREEN,0x01},
-  {TFT_GREEN,0x01}
+  {TFT_GREEN,TFT_DARKGREY},
+  {TFT_GREEN,TFT_BLACK},
+  {TFT_GREEN,TFT_DARKGREY}
+};
+
+int data_canvas_colors[][2] = {
+  {TFT_SKYBLUE,TFT_BLACK},
+  {TFT_WHITE,TFT_DARKGREY},
+  {TFT_WHITE,TFT_BLACK},
+  {TFT_WHITE,TFT_DARKGREY},
+  {TFT_WHITE,TFT_BLACK},
+  {TFT_WHITE,TFT_DARKGREY}
 };
 
 void initial_screen() {
@@ -145,24 +167,15 @@ void initial_screen() {
 
 }
 
-void setup_isr() {
-  // reset repeat counter
-//  stop_after=0;
-  pwm_config irqConfig = pwm_get_default_config();
-  pwm_config_set_wrap(&irqConfig, DEBUG_SPEED_ISR_TOP); // number of clock (possibly pre-divided) cycles to update isr
-  pwm_init(speedSlice, &irqConfig, true);
-//  pwm_set_chan_level(speedlice, 0, 100); // just something to look at on scope
-  irq_set_enabled(PWM_IRQ_WRAP, true);
-  pwm_set_irq_enabled(speedSlice, true);
-  pwm_clear_irq(speedSlice);
-}
-
 static uint16_t isr_high_counts = 2;
 static uint16_t isr_low_counts = 3;
 static uint16_t isr_high;
 static uint16_t isr_low;
 
-void speedIrqHandler() {
+uint16_t motor_pulses = 50; // 1 s default
+uint16_t pulse_no = 0;
+
+void pwmIrqHandler() {
   if (pwm_get_irq_status_mask()&(1<<speedSlice)) {
     pwm_clear_irq(speedSlice);
 
@@ -185,7 +198,19 @@ void speedIrqHandler() {
       isr_low=0;
     }
   }
+  if (pwm_get_irq_status_mask()&(1<<dirSlice)) {
+    pwm_clear_irq(dirSlice);
+    if(pulse_no == 0 || pulse_no > motor_pulses) {
+      // time to stop
+      pwm_set_enabled(dirSlice, false);
+      pwm_set_irq_enabled(dirSlice, false);
+      digitalWrite(DEBUG_DIR_PWM_PIN, HIGH);
+    }
+    else pulse_no--;
+  }
+
 }
+
 
 static uint32_t last_rotor_interrupt = 0; // elampsed millisecs
 static bool rotor_wait = false;
@@ -197,9 +222,15 @@ Adafruit_BME280 theBME280; // = Adafruit_BME280();
 static float last_bme280_temperature;
 static float last_bme280_humidity;
 static float last_bme_280_pressure;
+
+
 void read_bme280() 
 {
   last_bme280_temperature = theBME280.readTemperature();
+  last_bme280_humidity = theBME280.readHumidity();
+  last_bme_280_pressure = theBME280.readPressure();
+
+ 
 }
 
 
@@ -207,9 +238,64 @@ void read_board_T() {
   last_board_T = analogReadTemp();
 }
 
+float vane_offset_angle = 10; // degrees from North
+float last_wind_angle = 0;
+float wind_angle_breaks[][2] = {
+  {0, 22.5}, // N
+  {22.5, 67.5}, // NE
+  {67.5, 112.5}, // E
+  {112.5, 157.5}, // SE
+  {157.5, 202.5}, // S
+  {202.5, 247.5}, // SW
+  {247.5, 292.5}, // W
+  {292.5, 337.5}, // NW
+  {337.5, 360} // N
+};
+char wind_angle_labels[][3] = {
+  " N",
+  "NE",
+  " E",
+  "SE",
+  " S",
+  "SW",
+  " W",
+  "NW",
+  " N"
+};
+
+char angle_dir[] = "XX";
+
+#define NUM_VANE_BUF 3
+int vane_buf[NUM_VANE_BUF];
+
 // measure analog voltage
 void read_vane() {
-  last_vane_reading = analogRead(WIND_DIR_PIN);
+  // should be 0-1024 i.e. 10 bit
+  for (int i=0; i < NUM_VANE_BUF; ++i) {
+    vane_buf[i] = analogRead(WIND_DIR_PIN); 
+  }
+  last_vane_reading = 
+
+  last_wind_angle = (last_vane_reading/1024)*360 + vane_offset_angle;
+  if (last_wind_angle > 359.99) {
+    last_wind_angle = last_wind_angle - 360;
+  }
+  else if (last_wind_angle < 0) {
+    last_wind_angle = last_wind_angle + 360;
+  }
+
+ int widx = -1; 
+  for (int i=0; i < 9; ++i) {
+    if (last_wind_angle >= wind_angle_breaks[i][0] && last_wind_angle < wind_angle_breaks[i][1]) {
+       widx = i;
+       break;
+     }
+  }
+
+   if (widx >= 0) {
+     strncpy(angle_dir,wind_angle_labels[widx],2);
+   }
+
 }
 
 // measure elapsed millisecs from last edge trigger (from anemometer reed switch)
@@ -233,7 +319,7 @@ TwoWire theWire(i2c0,D0,D1);
 void setup() {
   // put your setup code here, to run once:
 
-  Serial.begin(9600);
+//  Serial.begin(9600);
   
   // blink once when setup begins
   digitalWrite(PIN_LED, HIGH);
@@ -252,7 +338,7 @@ void setup() {
   // "slice" is a weird name for "Counter Number" - there are 8 16 bit counters (0-7), 
   // each having two channels (A=0,B=1) supporting two outputs with different CC values
   pinMode(DEBUG_DIR_PWM_PIN,OUTPUT);
-  digitalWrite(DEBUG_DIR_PWM_PIN, LOW);
+  digitalWrite(DEBUG_DIR_PWM_PIN, HIGH);
 //  delay(100);
 
 
@@ -270,10 +356,14 @@ void setup() {
   dirSlice = pwm_gpio_to_slice_num(DEBUG_DIR_PWM_PIN);
   pwm_config dirConfig = pwm_get_default_config();
   // 133 MHz/256 = 519.5 kHz with 256 different levels
-  pwm_config_set_wrap(&dirConfig, DEBUG_DAC_TOP);
+  pwm_config_set_wrap(&dirConfig, MOTOR_TOP);
   pwm_init(dirSlice, &dirConfig, true);
+  pwm_set_clkdiv_int_frac(dirSlice, MOTOR_CLK_DIV, 0);
   pwm_set_enabled(dirSlice,false);
-  pwm_set_chan_level(dirSlice, 0, DEBUG_DAC_TOP/3);
+//  pwm_set_chan_level(dirSlice, 0, DEBUG_DAC_TOP/3);
+
+//  irq_set_enabled(PWM_IRQ_WRAP, true);
+
 
   gpio_set_function(DEBUG_SPEED_PWM_PIN, GPIO_FUNC_PWM);
   speedSlice = pwm_gpio_to_slice_num(DEBUG_SPEED_PWM_PIN);
@@ -289,10 +379,15 @@ void setup() {
   pwm_set_clkdiv_int_frac(speedSlice, DEBUG_SPEED_ISR_CLK_DIV, 0);
   isr_high = isr_high_counts;
   isr_low=0;
-  irq_add_shared_handler(PWM_IRQ_WRAP, speedIrqHandler,PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
+
+
+  irq_add_shared_handler(PWM_IRQ_WRAP, pwmIrqHandler,PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
   irq_set_enabled(PWM_IRQ_WRAP, true);
   pwm_set_irq_enabled(speedSlice, true);
   pwm_clear_irq(speedSlice);
+
+  pwm_set_irq_enabled(dirSlice, true);
+  pwm_clear_irq(dirSlice);
 
 // nothing was coming out of pins from scope so had to do this manually
   gpio_set_function(TFT_CS, GPIO_FUNC_SPI);
@@ -400,16 +495,53 @@ void setup() {
   tft.setCursor(0,0);
   tft.println("");
 
+
+
   // allocate canvases for rendering
   for (int i=0; i < NUM_BITMAPS; ++i) {
-    canvases[i] = new GFXcanvas1(bpos[i][2],bpos[i][3]);
+    label_canvases[i] = new GFXcanvas1(label_pos[i][2],label_pos[i][3]);
+  }
+  // allocate canvases for rendering
+  for (int i=0; i < NUM_BITMAPS; ++i) {
+    data_canvases[i] = new GFXcanvas1(data_pos[i][2],data_pos[i][3]);
   }
   
+  // print intial labels
+
+  label_canvases[DATE_CANVAS]->fillScreen(TFT_BLACK);
+
+  label_canvases[T_CANVAS]->fillScreen(TFT_BLACK);
+  label_canvases[T_CANVAS]->setFont(&FreeMonoBold18pt7b);
+  label_canvases[T_CANVAS]->setCursor(5, LABEL_OFFSET);
+  label_canvases[T_CANVAS]->printf("T(F)");
+
+  label_canvases[H_CANVAS]->fillScreen(TFT_BLACK);
+  label_canvases[H_CANVAS]->setFont(&FreeMonoBold18pt7b);
+  label_canvases[H_CANVAS]->setCursor(5, LABEL_OFFSET);
+  label_canvases[H_CANVAS]->printf("H(%%)");
+
+  label_canvases[P_CANVAS]->fillScreen(TFT_BLACK);
+  label_canvases[P_CANVAS]->setFont(&FreeMonoBold18pt7b);
+  label_canvases[P_CANVAS]->setCursor(5, LABEL_OFFSET);
+  label_canvases[P_CANVAS]->printf("P(inHg)");
+
+  label_canvases[WINDA_CANVAS]->fillScreen(TFT_BLACK);
+  label_canvases[WINDA_CANVAS]->setFont(&FreeMonoBold18pt7b);
+  label_canvases[WINDA_CANVAS]->setCursor(5, LABEL_OFFSET);
+  label_canvases[WINDA_CANVAS]->printf("D(deg)");
+
+  label_canvases[WINDV_CANVAS]->fillScreen(TFT_BLACK);
+  label_canvases[WINDV_CANVAS]->setFont(&FreeMonoBold18pt7b);
+  label_canvases[WINDV_CANVAS]->setCursor(5, LABEL_OFFSET);
+  label_canvases[WINDV_CANVAS]->printf("V(mph)");
+  for (int i=0; i < NUM_BITMAPS; ++i) {
+      tft.drawBitmap(label_pos[i][0],label_pos[i][1],label_canvases[i]->getBuffer(),label_pos[i][2],label_pos[i][3],label_canvas_colors[i][0],label_canvas_colors[i][1]);
+  }
+
   // reset loop update clock
   update_millis = 0;
   rotor_millis  = 0;
-  motor_millis = 0;
-  motor_is_moving = false;
+
 
   // set up UDP 
   if(udp.listen(UDP_LISTEN_PORT)) {
@@ -613,21 +745,23 @@ void parsePacket(AsyncUDPPacket packet) {
           outgoing_data_len=6;
           checksum_packet(outgoing_packet_buf, outgoing_data_len);
           if (tcount <= 180) {
+              pulse_no = motor_pulses;
               gpio_set_function(DEBUG_DIR_PWM_PIN, GPIO_FUNC_PWM);
-              pwm_set_enabled(dirSlice, true);
+              pwm_set_enabled(dirSlice, false);
               pwm_config dirConfig = pwm_get_default_config();
               pwm_config_set_wrap(&dirConfig, MOTOR_TOP);
               pwm_config_set_clkdiv(&dirConfig, MOTOR_CLK_DIV);
-              pwm_init(dirSlice, &dirConfig, true);
-              // map 0-180 degrees to 1-2 ms level
+              pwm_init(dirSlice, &dirConfig, false);   
+              // map 0-180 degrees to 0.5-2.5 ms level
               float time_to_top = ((float)MOTOR_TOP*(float)MOTOR_CLK_DIV)/(float)PICOW_CLK_FREQ;
-              float one_ms_level = (0.001/time_to_top)*MOTOR_TOP; // pwm_level for for one ms pulse
-              float frac = (float)tcount/180.0; // fraction of half-rotation
-              float motor_width = one_ms_level*frac; 
-              uint16_t motor_level = (uint16_t)(motor_width + one_ms_level);
+              float half_ms_level = (0.0005/time_to_top)*MOTOR_TOP; // pwm_level for for half ms pulse
+              float frac = (float)(tcount)/180.0; // fraction of half-rotation
+              float motor_width = 4*half_ms_level*frac; // add up to 2 ms to base 0.5 ms pulse 
+              uint16_t motor_level = (uint16_t)(MOTOR_TOP - (motor_width + half_ms_level));
               pwm_set_chan_level(dirSlice, 0, motor_level);
-              motor_millis=0;
-              motor_is_moving = true;
+              pwm_set_irq_enabled(dirSlice, true);
+              pwm_clear_irq(dirSlice);
+              pwm_set_enabled(dirSlice, true);
           }
           else last_packet_error = PERR_COUNT_RANGE; 
 
@@ -661,7 +795,6 @@ void parsePacket(AsyncUDPPacket packet) {
     packet.write((uint8_t*) outgoing_packet_buf, outgoing_data_len);
 }
 
-
 void loop() {
   // put your main code here, to run repeatedly:
 
@@ -673,13 +806,6 @@ void loop() {
   else {
     gizmo_state = STATE_WAIT;
   }
-
-  if(motor_millis > MOTOR_MOVING_MILLIS & motor_is_moving) {
-    pwm_set_enabled(dirSlice, false);
-    digitalWrite(DEBUG_DIR_PWM_PIN, LOW);
-    motor_is_moving = false;
-  }
-
 
 
   switch (gizmo_state) {
@@ -693,41 +819,51 @@ void loop() {
 
        // update date/time first
       dtntp.get_date();
-      canvases[DATE_CANVAS]->fillScreen(TFT_BLACK);
-      canvases[DATE_CANVAS]->setFont(&FreeMonoBold12pt7b);
-      canvases[DATE_CANVAS]->setCursor(30, 16);
-      canvases[DATE_CANVAS]->printf("%s\n",dtntp.date_cstring);
-      int16_t ycur = canvases[DATE_CANVAS]->getCursorY();
-      canvases[DATE_CANVAS]->setCursor(0, ycur+5);
-      canvases[DATE_CANVAS]->setFont(&FreeMonoBold18pt7b);
-      canvases[DATE_CANVAS]->printf("%s",dtntp.time_cstring);
+      data_canvases[DATE_CANVAS]->fillScreen(TFT_BLACK);
+      data_canvases[DATE_CANVAS]->setFont(&FreeMonoBold12pt7b);
+      data_canvases[DATE_CANVAS]->setCursor(30, 16);
+      data_canvases[DATE_CANVAS]->printf("%s\n",dtntp.date_cstring);
+      int16_t ycur = data_canvases[DATE_CANVAS]->getCursorY();
+      data_canvases[DATE_CANVAS]->setCursor(0, ycur+5);
+      data_canvases[DATE_CANVAS]->setFont(&FreeMonoBold18pt7b);
+      data_canvases[DATE_CANVAS]->printf("%s",dtntp.time_cstring);
 
-      canvases[T_CANVAS]->fillScreen(TFT_BLACK);
-      canvases[T_CANVAS]->setFont(&FreeMonoBold12pt7b);
-      canvases[T_CANVAS]->setCursor(5, 40);
-      canvases[T_CANVAS]->printf("T=%.1f, L=%d, C=%d" ,last_bme280_temperature,last_packet_length,received_packet_count);
+      data_canvases[T_CANVAS]->fillScreen(TFT_BLACK);
+      data_canvases[T_CANVAS]->setFont(&FreeMonoBold18pt7b);
+      data_canvases[T_CANVAS]->setCursor(15, LABEL_OFFSET);
+      data_canvases[T_CANVAS]->printf("%.1f" ,(9*last_bme280_temperature/5)+32);
 
-      canvases[H_CANVAS]->fillScreen(TFT_BLACK);
-      canvases[H_CANVAS]->setFont(&FreeMonoBold12pt7b);
-      canvases[H_CANVAS]->setCursor(5, 40);
-      canvases[H_CANVAS]->printf("d=%d, s=%d, m=%d",last_vane_reading,last_rotor_interrupt,(motor_is_moving?1:0));
+      data_canvases[H_CANVAS]->fillScreen(TFT_BLACK);
+      data_canvases[H_CANVAS]->setFont(&FreeMonoBold18pt7b);
+      data_canvases[H_CANVAS]->setCursor(15, LABEL_OFFSET);
+      data_canvases[H_CANVAS]->printf("%.1f" ,last_bme280_humidity);
 
-//      Serial.println("Dir slice = " + String(dirSlice));
+      data_canvases[P_CANVAS]->fillScreen(TFT_BLACK);
+      data_canvases[P_CANVAS]->setFont(&FreeMonoBold18pt7b);
+      data_canvases[P_CANVAS]->setCursor(15, LABEL_OFFSET);
+      data_canvases[P_CANVAS]->printf("%.2f",0.001*last_bme_280_pressure/3.387);
+
+      data_canvases[WINDA_CANVAS]->fillScreen(TFT_BLACK);
+      data_canvases[WINDA_CANVAS]->setFont(&FreeMonoBold18pt7b);
+      data_canvases[WINDA_CANVAS]->setCursor(5, LABEL_OFFSET);
+      data_canvases[WINDA_CANVAS]->printf("%.0f %s",last_wind_angle, angle_dir);
+
+      if (last_rotor_interrupt < 5000 && last_rotor_interrupt > 0) {
+        data_canvases[WINDV_CANVAS]->fillScreen(TFT_BLACK);
+        data_canvases[WINDV_CANVAS]->setFont(&FreeMonoBold18pt7b);
+        data_canvases[WINDV_CANVAS]->setCursor(5, LABEL_OFFSET);
+        // nominal speed is S = 2250/T where T is in ms and S is in mph
+        // See e.g.
+        // https://www.digitalconcepts.net.au/arduino/index.php?op=DavisWind
+        // There is a correction table vs. angle available too: see
+        //  https://github.com/kobuki/weewx-meteoRX/tree/master
+        data_canvases[WINDV_CANVAS]->printf("%.1", 2250/last_rotor_interrupt);
+      }
 
       for (int i=0; i < NUM_BITMAPS; ++i) {
-          tft.drawBitmap(bpos[i][0],bpos[i][1],canvases[i]->getBuffer(),bpos[i][2],bpos[i][3],canvas_colors[i][0],canvas_colors[i][1]);
+          tft.drawBitmap(data_pos[i][0],data_pos[i][1],data_canvases[i]->getBuffer(),data_pos[i][2],data_pos[i][3],data_canvas_colors[i][0],data_canvas_colors[i][1]);
       }
-//      Serial.println("Update " + String(debug_counter));
-//      tft.setTextColor(TFT_GREEN); 
-//      tft.setCursor(0,0);
-//      tft.println("                    ");
-//      tft.println("                    ");
-//      tft.setCursor(0,0);
-//      dtntp.get_date();
-//      tft.println(dtntp.date_cstring);
-//      tft.println(dtntp.time_cstring);
-//      sprintf(debug_buf,"%d",debug_counter);
-//      tft.println(debug_buf);
+
       break;
     }
     case STATE_WAIT:
