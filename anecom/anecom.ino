@@ -44,7 +44,8 @@ char debug_buf[30];
 // 133/(522*255) ==> 1.0008 ms per interrupt
 #define DEBUG_SPEED_ISR_TOP 522 // clock cycles (possibly pre-divided) to generate IRQ
 #define DEBUG_SPEED_ISR_CLK_DIV 255 // pre-divide 133 MHz clock by this
-#define DEBUG_DAC_TOP 1024 // clock cycles (possibly pre-divided) to generate IRQ
+#define DEBUG_DAC_TOP 1024 // clock cycles between pulses
+#define DEBUG_DAC_CLK_DIV 1
 
 #define PICOW_CLK_FREQ 133000000
 #define MOTOR_TOP 10431 // with 255 clk div is 50 Hz (20 ms period)
@@ -168,11 +169,11 @@ void initial_screen() {
 }
 
 static uint16_t isr_high_counts = 2;
-static uint16_t isr_low_counts = 3;
+static uint16_t isr_low_counts = 48;
 static uint16_t isr_high;
 static uint16_t isr_low;
 
-uint16_t motor_pulses = 50; // 1 s default
+uint16_t motor_pulses = 50; // 1 s default with 20 ms period
 uint16_t pulse_no = 0;
 
 void pwmIrqHandler() {
@@ -265,18 +266,12 @@ char wind_angle_labels[][3] = {
 
 char angle_dir[] = "XX";
 
-#define NUM_VANE_BUF 3
-int vane_buf[NUM_VANE_BUF];
-
 // measure analog voltage
 void read_vane() {
   // should be 0-1024 i.e. 10 bit
-  for (int i=0; i < NUM_VANE_BUF; ++i) {
-    vane_buf[i] = analogRead(WIND_DIR_PIN); 
-  }
-  last_vane_reading = 
+  last_vane_reading = analogRead(WIND_DIR_PIN); 
 
-  last_wind_angle = (last_vane_reading/1024)*360 + vane_offset_angle;
+  last_wind_angle = ((float)last_vane_reading/1024)*360 + vane_offset_angle;
   if (last_wind_angle > 359.99) {
     last_wind_angle = last_wind_angle - 360;
   }
@@ -728,8 +723,20 @@ void parsePacket(AsyncUDPPacket packet) {
           outgoing_packet_buf[3]=(uint8_t)((tcount>>8)&255);
           outgoing_data_len=6;
           checksum_packet(outgoing_packet_buf, outgoing_data_len);
+          pwm_set_irq_enabled(dirSlice, false);
           if (tcount < DEBUG_DAC_TOP) { 
-             pwm_set_chan_level(dirSlice, 0, tcount);
+              if (tcount == 0) { 
+                // stop PWM
+                pwm_set_enabled(dirSlice,false);
+              }
+              else {
+                pwm_config dirConfig = pwm_get_default_config();
+                pwm_config_set_wrap(&dirConfig, DEBUG_DAC_TOP);
+                pwm_config_set_clkdiv(&dirConfig, DEBUG_DAC_CLK_DIV);
+                pwm_init(dirSlice, &dirConfig, true);   
+                pwm_set_chan_level(dirSlice, 0, tcount);
+                pwm_set_enabled(dirSlice, true);
+              }
           }
           else last_packet_error = PERR_COUNT_RANGE; 
 
@@ -857,7 +864,7 @@ void loop() {
         // https://www.digitalconcepts.net.au/arduino/index.php?op=DavisWind
         // There is a correction table vs. angle available too: see
         //  https://github.com/kobuki/weewx-meteoRX/tree/master
-        data_canvases[WINDV_CANVAS]->printf("%.1f", 2250/last_rotor_interrupt);
+        data_canvases[WINDV_CANVAS]->printf("%.1f", (float)(2250)/(float)(last_rotor_interrupt));
       }
 
       for (int i=0; i < NUM_BITMAPS; ++i) {
