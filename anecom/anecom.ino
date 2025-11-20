@@ -857,7 +857,7 @@ void loop() {
         // https://www.digitalconcepts.net.au/arduino/index.php?op=DavisWind
         // There is a correction table vs. angle available too: see
         //  https://github.com/kobuki/weewx-meteoRX/tree/master
-        data_canvases[WINDV_CANVAS]->printf("%.1", 2250/last_rotor_interrupt);
+        data_canvases[WINDV_CANVAS]->printf("%.1f", 2250/last_rotor_interrupt);
       }
 
       for (int i=0; i < NUM_BITMAPS; ++i) {
