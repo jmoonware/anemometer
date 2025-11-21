@@ -34,9 +34,6 @@ IPAddress static_subnet(255,255,255,0);
 TFT_eSPI tft = TFT_eSPI();
 uint8_t backlight_pwm_slice;
 
-// DEBUG STUFF - FIXME
-static int debug_counter=0;
-char debug_buf[30];
 // here "physical pin" means pins 1-40 of the Pico W board
 #define DEBUG_DIR_PWM_PIN D6 // physical pin 9
 #define DEBUG_SPEED_PWM_PIN D4 // physical pin 6
@@ -174,7 +171,9 @@ static uint16_t isr_high;
 static uint16_t isr_low;
 
 uint16_t motor_pulses = 50; // 1 s default with 20 ms period
+
 uint16_t pulse_no = 0;
+uint16_t last_motor_angle=0;
 
 void pwmIrqHandler() {
   if (pwm_get_irq_status_mask()&(1<<speedSlice)) {
@@ -217,6 +216,8 @@ static uint32_t last_rotor_interrupt = 0; // elampsed millisecs
 static bool rotor_wait = false;
 #define ROTOR_WAIT 65535 // if we never got a trigger then value isn't valid
 static int last_vane_reading = 0;
+static float last_wind_velocity = 0;
+
 static float last_board_T = -1;
 
 Adafruit_BME280 theBME280; // = Adafruit_BME280();
@@ -305,6 +306,10 @@ void read_speed() {
 void rotorIsr() {
   rotor_wait = false;
   last_rotor_interrupt = rotor_millis;
+  if (last_rotor_interrupt > 0) {
+    last_wind_velocity = ((float)2250)/last_rotor_interrupt;
+  }
+  
   rotor_millis = 0;
 }
 
@@ -315,8 +320,7 @@ void setup() {
   // put your setup code here, to run once:
 
 //  Serial.begin(9600);
-  
-  // blink once when setup begins
+
   digitalWrite(PIN_LED, HIGH);
   delay(300);
   digitalWrite(PIN_LED, LOW);
@@ -437,7 +441,7 @@ void setup() {
   }
 
   // start the date time NTP updates
-  # define NTP_RETRIES 3 
+  #define NTP_RETRIES 3 
   tft.println("");
   tft.println("Starting NTP...");
   uint8_t retries = 0;
@@ -544,12 +548,7 @@ void setup() {
       parsePacket(packet);
     });
   }
-
-
 }
-
-
-
 
 enum PACKET_COMMANDS {
   PCOMMAND_RESERVED,
@@ -557,18 +556,16 @@ enum PACKET_COMMANDS {
   PCOMMAND_UPTIME,
   PCOMMAND_READ_DIR_AD_RAW,
   PCOMMAND_READ_SPEED_TIMER_RAW,
-  PCOMMAND_READ_BME_TEMP,
-  PCOMMAND_NUM_READ_COMMANDS,
+  PCOMMAND_READ_BME_VALS,
+  PCOMMAND_READ_WIND_VALS,
   PCOMMAND_READ_BOARD_T, 
+  PCOMMAND_NUM_READ_COMMANDS,
   PCOMMAND_SET_ISR_LOW_COUNT,
   PCOMMAND_SET_ISR_HIGH_COUNT,
   PCOMMAND_SET_DAC_LEVEL, 
-  PCOMMAND_SET_MOTOR_POSITION
+  PCOMMAND_SET_MOTOR_POSITION,
+  PCOMMAND_SET_BACKLIGHT_LEVEL
 };
-
-// this buffer holds the latest uint16 values that can be read
-uint16_t read_values[PCOMMAND_NUM_READ_COMMANDS];
-
 
 enum PACKET_ERRORS {
   PERR_NONE,
@@ -597,10 +594,6 @@ void checksum_packet(unsigned char *buf, uint16_t buflen) {
   buf[buflen-1]=(uint8_t)(checksum>>8);
 }
 
-void buildPacket(int command, uint64_t val,uint8_t bytes = 2) {
-
-}
-
 void parsePacket(AsyncUDPPacket packet) {
 
     received_packet_count+=1;
@@ -614,25 +607,31 @@ void parsePacket(AsyncUDPPacket packet) {
     outgoing_data_len = 0;
     // first byte = 0x06 (ACK); last two bytes are checksum
     if (incoming_packet_buf[0]==0x06 && last_packet_length > 2) { 
+      outgoing_packet_buf[0]=ACK_BYTE;
+      outgoing_packet_buf[1]=incoming_packet_buf[1];
       switch(incoming_packet_buf[1]) { // command byte
         case PCOMMAND_STATUS:
         {
-          outgoing_packet_buf[0]=ACK_BYTE;
-          outgoing_packet_buf[1]=PCOMMAND_STATUS;
-          // TODO: fill in dummy vals
-          outgoing_packet_buf[2]=0x00;
-          outgoing_packet_buf[3]=0x01;
-          outgoing_packet_buf[4]=0x02;
-          outgoing_packet_buf[5]=0x03;
-          outgoing_data_len=8;
+          uint32_t uptime_secs = dtntp.last_secs-dtntp.init_secs;
+          outgoing_packet_buf[2]=uptime_secs&255;
+          outgoing_packet_buf[3]=(uptime_secs>>8)&255;
+          outgoing_packet_buf[4]=(uptime_secs>>16)&255;
+          outgoing_packet_buf[5]=(uptime_secs>>24)&255;
+          outgoing_packet_buf[6]=((uint8_t)last_motor_angle)&255;
+          int16_t scaled_T = (int16_t)(last_board_T*10);
+          outgoing_packet_buf[7]=(uint8_t)(scaled_T&255);
+          outgoing_packet_buf[8]=(uint8_t)((scaled_T>>8)&255);
+          outgoing_packet_buf[9]=(uint8_t)((received_packet_count)&255);
+          outgoing_packet_buf[10]=(uint8_t)((received_packet_count>>8)&255);
+          outgoing_packet_buf[11]=(uint8_t)((received_packet_count>>16)&255);
+          outgoing_packet_buf[12]=(uint8_t)((received_packet_count>>24)&255);
+          outgoing_data_len=15;
           checksum_packet(outgoing_packet_buf, outgoing_data_len);
           break;
         }
         case PCOMMAND_UPTIME:
         {
           uint32_t uptime_secs = dtntp.last_secs-dtntp.init_secs;
-          outgoing_packet_buf[0]=ACK_BYTE;
-          outgoing_packet_buf[1]=PCOMMAND_UPTIME;
           outgoing_packet_buf[2]=(uint8_t)(uptime_secs&255);
           outgoing_packet_buf[3]=(uint8_t)((uptime_secs>>8)&255);
           outgoing_packet_buf[4]=(uint8_t)((uptime_secs>>16)&255);
@@ -643,8 +642,6 @@ void parsePacket(AsyncUDPPacket packet) {
         }
         case PCOMMAND_READ_DIR_AD_RAW:
         {
-          outgoing_packet_buf[0]=ACK_BYTE;
-          outgoing_packet_buf[1]=PCOMMAND_READ_DIR_AD_RAW;
           outgoing_packet_buf[2]=(uint8_t)(last_vane_reading&255);
           outgoing_packet_buf[3]=(uint8_t)((last_vane_reading>>8)&255);
           outgoing_data_len=6;
@@ -653,8 +650,6 @@ void parsePacket(AsyncUDPPacket packet) {
         }
         case PCOMMAND_READ_SPEED_TIMER_RAW:
         {
-          outgoing_packet_buf[0]=ACK_BYTE;
-          outgoing_packet_buf[1]=PCOMMAND_READ_SPEED_TIMER_RAW;
           outgoing_packet_buf[2]=(uint8_t)(last_rotor_interrupt&255);
           outgoing_packet_buf[3]=(uint8_t)((last_rotor_interrupt>>8)&255);
           outgoing_data_len=6;
@@ -663,8 +658,6 @@ void parsePacket(AsyncUDPPacket packet) {
         }
         case PCOMMAND_READ_BOARD_T:
         {
-          outgoing_packet_buf[0]=ACK_BYTE;
-          outgoing_packet_buf[1]=PCOMMAND_READ_BOARD_T;
           int16_t scaled_T = (int16_t)(last_board_T*10);
           outgoing_packet_buf[2]=(uint8_t)(scaled_T&255);
           outgoing_packet_buf[3]=(uint8_t)((scaled_T>>8)&255);
@@ -672,22 +665,36 @@ void parsePacket(AsyncUDPPacket packet) {
           checksum_packet(outgoing_packet_buf, outgoing_data_len);
           break;
         }
-        case PCOMMAND_READ_BME_TEMP:
+        case PCOMMAND_READ_BME_VALS:
         {
-          outgoing_packet_buf[0]=ACK_BYTE;
-          outgoing_packet_buf[1]=PCOMMAND_READ_BME_TEMP;
           int16_t scaled_T = (int16_t)(last_bme280_temperature*10);
           outgoing_packet_buf[2]=(uint8_t)(scaled_T&255);
           outgoing_packet_buf[3]=(uint8_t)((scaled_T>>8)&255);
-          outgoing_data_len=6;
+          int16_t scaled_H = (int16_t)(last_bme280_humidity*10);
+          outgoing_packet_buf[4]=(uint8_t)(scaled_H&255);
+          outgoing_packet_buf[5]=(uint8_t)((scaled_H>>8)&255);
+          int16_t scaled_P = (int16_t)(0.1*last_bme_280_pressure/3.387); // 100x inHg vals
+          outgoing_packet_buf[6]=(uint8_t)(scaled_P&255);
+          outgoing_packet_buf[7]=(uint8_t)((scaled_P>>8)&255);
+          outgoing_data_len=10;
+          checksum_packet(outgoing_packet_buf, outgoing_data_len);
+          break;
+        }
+        case PCOMMAND_READ_WIND_VALS:
+        {
+          int16_t scaled_A = (int16_t)(last_wind_angle*10);
+          outgoing_packet_buf[2]=(uint8_t)(scaled_A&255);
+          outgoing_packet_buf[3]=(uint8_t)((scaled_A>>8)&255);
+          int16_t scaled_V = (int16_t)(last_wind_velocity*10);
+          outgoing_packet_buf[4]=(uint8_t)(scaled_V&255);
+          outgoing_packet_buf[5]=(uint8_t)((scaled_V>>8)&255);
+          outgoing_data_len=8;
           checksum_packet(outgoing_packet_buf, outgoing_data_len);
           break;
         }
         case PCOMMAND_SET_ISR_LOW_COUNT:
         {
           uint16_t tcount = (uint16_t)incoming_packet_buf[2]+(((uint16_t)incoming_packet_buf[3])<<8);
-          outgoing_packet_buf[0]=ACK_BYTE;
-          outgoing_packet_buf[1]=PCOMMAND_SET_ISR_LOW_COUNT;
           outgoing_packet_buf[2]=(uint8_t)(tcount&255);
           outgoing_packet_buf[3]=(uint8_t)((tcount>>8)&255);
           outgoing_data_len=6;
@@ -701,8 +708,6 @@ void parsePacket(AsyncUDPPacket packet) {
         case PCOMMAND_SET_ISR_HIGH_COUNT:
         {
           uint16_t tcount = (uint16_t)incoming_packet_buf[2]+(((uint16_t)incoming_packet_buf[3])<<8);
-          outgoing_packet_buf[0]=ACK_BYTE;
-          outgoing_packet_buf[1]=PCOMMAND_SET_ISR_HIGH_COUNT;
           outgoing_packet_buf[2]=(uint8_t)(tcount&255);
           outgoing_packet_buf[3]=(uint8_t)((tcount>>8)&255);
           outgoing_data_len=6;
@@ -717,8 +722,6 @@ void parsePacket(AsyncUDPPacket packet) {
         case PCOMMAND_SET_DAC_LEVEL:
         {
           uint16_t tcount = (uint16_t)incoming_packet_buf[2]+(((uint16_t)incoming_packet_buf[3])<<8);
-          outgoing_packet_buf[0]=ACK_BYTE;
-          outgoing_packet_buf[1]=PCOMMAND_SET_DAC_LEVEL;
           outgoing_packet_buf[2]=(uint8_t)(tcount&255);
           outgoing_packet_buf[3]=(uint8_t)((tcount>>8)&255);
           outgoing_data_len=6;
@@ -746,14 +749,13 @@ void parsePacket(AsyncUDPPacket packet) {
         case PCOMMAND_SET_MOTOR_POSITION:
         {
           uint16_t tcount = (uint16_t)incoming_packet_buf[2]+(((uint16_t)incoming_packet_buf[3])<<8);
-          outgoing_packet_buf[0]=ACK_BYTE;
-          outgoing_packet_buf[1]=PCOMMAND_SET_MOTOR_POSITION;
           outgoing_packet_buf[2]=(uint8_t)(tcount&255);
           outgoing_packet_buf[3]=(uint8_t)((tcount>>8)&255);
           outgoing_data_len=6;
           checksum_packet(outgoing_packet_buf, outgoing_data_len);
           if (tcount <= 180) {
               pulse_no = motor_pulses;
+              last_motor_angle = tcount;
               gpio_set_function(DEBUG_DIR_PWM_PIN, GPIO_FUNC_PWM);
               pwm_set_enabled(dirSlice, false);
               pwm_config dirConfig = pwm_get_default_config();
@@ -775,6 +777,22 @@ void parsePacket(AsyncUDPPacket packet) {
 
           break;
         }
+        case PCOMMAND_SET_BACKLIGHT_LEVEL:
+        {
+          uint16_t tcount = (uint16_t)incoming_packet_buf[2]+(((uint16_t)incoming_packet_buf[3])<<8);
+          outgoing_packet_buf[2]=(uint8_t)(tcount&255);
+          outgoing_packet_buf[3]=(uint8_t)((tcount>>8)&255);
+          outgoing_data_len=6;
+          checksum_packet(outgoing_packet_buf, outgoing_data_len);
+          pwm_set_irq_enabled(dirSlice, false);
+          uint16_t level = (uint16_t)(((float)tcount/100)*BACKLIGHT_TOP);
+          if (level < BACKLIGHT_TOP) { 
+            pwm_set_chan_level(backlight_pwm_slice, 1, level); 
+          }
+          else last_packet_error = PERR_COUNT_RANGE; 
+          break;
+        }
+
         default:
         {
           last_packet_error = PERR_UNK_COMMAND;
@@ -786,11 +804,8 @@ void parsePacket(AsyncUDPPacket packet) {
     else {
       last_packet_error = PERR_NO_ACK;
     }
-//    Serial.println("Packet " + String(received_packet_count));
-//    for(int i=0; i < packet.length();++i) {
-//      Serial.printf("%x ",incoming_packet_buf[i]);
-//    }
 
+    // there was an error so send a NACK 
     if (last_packet_error!=PERR_NONE) {
       outgoing_packet_buf[0]=NACK_BYTE;  
       outgoing_packet_buf[1]=last_packet_error;
@@ -804,17 +819,14 @@ void parsePacket(AsyncUDPPacket packet) {
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
 
   if (update_millis > update_delay) {
       gizmo_state = STATE_UPDATE;
       update_millis = 0;
-      debug_counter+=1;
   }
   else {
     gizmo_state = STATE_WAIT;
   }
-
 
   switch (gizmo_state) {
     case STATE_UPDATE:
@@ -856,27 +868,29 @@ void loop() {
       data_canvases[WINDA_CANVAS]->setCursor(5, LABEL_OFFSET);
       data_canvases[WINDA_CANVAS]->printf("%.0f %s",last_wind_angle, angle_dir);
 
+
+      data_canvases[WINDV_CANVAS]->fillScreen(TFT_BLACK);
+      data_canvases[WINDV_CANVAS]->setFont(&FreeMonoBold18pt7b);
+      data_canvases[WINDV_CANVAS]->setCursor(5, LABEL_OFFSET);
+      // nominal speed is S = 2250/T where T is in ms and S is in mph
+      // See e.g.
+      // https://www.digitalconcepts.net.au/arduino/index.php?op=DavisWind
+      // There is a correction table vs. angle available too: see
+      //  https://github.com/kobuki/weewx-meteoRX/tree/master
       if (last_rotor_interrupt < 5000 && last_rotor_interrupt > 0) {
-        data_canvases[WINDV_CANVAS]->fillScreen(TFT_BLACK);
-        data_canvases[WINDV_CANVAS]->setFont(&FreeMonoBold18pt7b);
-        data_canvases[WINDV_CANVAS]->setCursor(5, LABEL_OFFSET);
-        // nominal speed is S = 2250/T where T is in ms and S is in mph
-        // See e.g.
-        // https://www.digitalconcepts.net.au/arduino/index.php?op=DavisWind
-        // There is a correction table vs. angle available too: see
-        //  https://github.com/kobuki/weewx-meteoRX/tree/master
         data_canvases[WINDV_CANVAS]->printf("%.1f", (float)(2250)/(float)(last_rotor_interrupt));
+      }
+      else {
+        data_canvases[WINDV_CANVAS]->printf("0.0");
       }
 
       for (int i=0; i < NUM_BITMAPS; ++i) {
           tft.drawBitmap(data_pos[i][0],data_pos[i][1],data_canvases[i]->getBuffer(),data_pos[i][2],data_pos[i][3],data_canvas_colors[i][0],data_canvas_colors[i][1]);
       }
-
       break;
     }
     case STATE_WAIT:
     {
-
       break;
     }
   }
