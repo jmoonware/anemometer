@@ -48,7 +48,9 @@ commands = {
   "PCOMMAND_READ_WIND_VALS":{'val':6,'responses':
 	[
 		ResponseElement("wind_A_deg", 2,scale=10),
+		ResponseElement("wind_V_mph_last", 2,scale=10),
 		ResponseElement("wind_V_mph", 2,scale=10),
+		ResponseElement("rotor_mad_ms", 2,scale=10),
 	],
 	'default_payload':bytearray()},
   "PCOMMAND_READ_BOARD_T":{'val':7,'responses':
@@ -197,6 +199,7 @@ def parse_received(rec):
 
 if clargs.all: # send it all!
 	for c in commands:
+		print(c)
 		print(parse_received(send_packet(commands[c]['val'],commands[c]['default_payload'])))
 
 else:

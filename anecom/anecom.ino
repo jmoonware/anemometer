@@ -35,8 +35,8 @@ TFT_eSPI tft = TFT_eSPI();
 uint8_t backlight_pwm_slice;
 
 // here "physical pin" means pins 1-40 of the Pico W board
-#define DEBUG_DIR_PWM_PIN D6 // physical pin 9
-#define DEBUG_SPEED_PWM_PIN D4 // physical pin 6
+#define DEBUG_DIR_PWM_PIN D6 // physical pin 9, black wire, also motor PWM
+#define DEBUG_SPEED_PWM_PIN D4 // physical pin 6, white wire
 #define DEBUG_SPEED_ISR_PIN D3 // physical pin 5
 // 133/(522*255) ==> 1.0008 ms per interrupt
 #define DEBUG_SPEED_ISR_TOP 522 // clock cycles (possibly pre-divided) to generate IRQ
@@ -79,6 +79,9 @@ uint32_t update_delay = 1*1000; // ms, for raw sensor data
 
 enum GIZMO_STATES {
   STATE_UPDATE,
+  STATE_DO_LEFT_BUTTON,
+  STATE_DO_RIGHT_BUTTON,
+  STATE_MOTOR_MOVING,
   STATE_WAIT
 };
 uint8_t gizmo_state;
@@ -90,11 +93,14 @@ enum BITMAP_NAMES {
   P_CANVAS,
   WINDV_CANVAS,
   WINDA_CANVAS,
+  DATA_CANVAS, // general purpose
   NUM_BITMAPS
 };
 
 GFXcanvas1 *label_canvases[NUM_BITMAPS]; 
 GFXcanvas1 *data_canvases[NUM_BITMAPS]; 
+TFT_eSPI_Button left_button = TFT_eSPI_Button();
+TFT_eSPI_Button right_button = TFT_eSPI_Button();
 
 #define LABEL_WIDTH 150
 #define LABEL_OFFSET 35
@@ -106,6 +112,7 @@ int data_pos[][4] = {
   {LABEL_WIDTH,170,320-LABEL_WIDTH,50}, // pressure
   {LABEL_WIDTH,220,320-LABEL_WIDTH,50}, // wind v
   {LABEL_WIDTH,270,320-LABEL_WIDTH,50}, // wind angle
+  {0,320,320,50}, // data
 };
 
 int label_pos[][4] = {
@@ -115,6 +122,7 @@ int label_pos[][4] = {
   {0,170,LABEL_WIDTH,50}, // pressure
   {0,220,LABEL_WIDTH,50}, // wind v
   {0,270,LABEL_WIDTH,50}, // wind angle
+  {0,320,320,50}, // data
 };
 
 // text color, background color
@@ -124,7 +132,8 @@ int label_canvas_colors[][2] = {
   {TFT_GREEN,TFT_BLACK},
   {TFT_GREEN,TFT_DARKGREY},
   {TFT_GREEN,TFT_BLACK},
-  {TFT_GREEN,TFT_DARKGREY}
+  {TFT_GREEN,TFT_DARKGREY},
+  {TFT_GREEN,TFT_BLACK},
 };
 
 int data_canvas_colors[][2] = {
@@ -133,7 +142,8 @@ int data_canvas_colors[][2] = {
   {TFT_WHITE,TFT_BLACK},
   {TFT_WHITE,TFT_DARKGREY},
   {TFT_WHITE,TFT_BLACK},
-  {TFT_WHITE,TFT_DARKGREY}
+  {TFT_WHITE,TFT_DARKGREY},
+  {TFT_WHITE,TFT_BLACK},
 };
 
 void initial_screen() {
@@ -178,7 +188,6 @@ uint16_t last_motor_angle=0;
 void pwmIrqHandler() {
   if (pwm_get_irq_status_mask()&(1<<speedSlice)) {
     pwm_clear_irq(speedSlice);
-
     if (isr_high!=0 && isr_low==0){
       isr_high--;
       digitalWrite(DEBUG_SPEED_ISR_PIN, HIGH); 
@@ -209,10 +218,12 @@ void pwmIrqHandler() {
     else pulse_no--;
   }
 
+
+ 
 }
 
 
-static uint32_t last_rotor_interrupt = 0; // elampsed millisecs
+static float last_rotor_interrupt = 0; // elapsed millisecs
 static bool rotor_wait = false;
 #define ROTOR_WAIT 65535 // if we never got a trigger then value isn't valid
 static int last_vane_reading = 0;
@@ -240,7 +251,7 @@ void read_board_T() {
   last_board_T = analogReadTemp();
 }
 
-float vane_offset_angle = 10; // degrees from North
+float vane_offset_angle = 32; // degrees from North
 float last_wind_angle = 0;
 float wind_angle_breaks[][2] = {
   {0, 22.5}, // N
@@ -294,23 +305,122 @@ void read_vane() {
 
 }
 
-// measure elapsed millisecs from last edge trigger (from anemometer reed switch)
-void read_speed() {
-  if (rotor_wait) last_rotor_interrupt = ROTOR_WAIT;
-  // reset every 5 s if no rotor pulses
-  if (last_rotor_interrupt > 5000) rotor_millis =0;
-  rotor_wait = true;
+// this stuff removes outlier values from a small buffer
+#define ROTOR_DEBOUNCE_BUFLEN 5
+float rotor_debounce_buffer[ROTOR_DEBOUNCE_BUFLEN];
+float trim_buffer[ROTOR_DEBOUNCE_BUFLEN];
+int debounce_buf_idx=0;
+
+float rotor_mad_frac = 0.0; // maximum abs dev fraction
+float last_rotor_trimmed_mean=0;
+float last_rotor_trimmed_mad=0;
+float rotor_mad_threshold = 0.3;
+
+
+// iterative outlier removal
+// will converge on median
+// assumes positive-definte values 
+void trimmed_mean(float *buf,uint8_t n, float *trimmed_mean, float *trimmed_mad, int max_iter=2) {
+
+
+  // trim highest, lowest and average remaining
+  float lowest = buf[0];
+  float highest = buf[0];
+  int low_idx=0;
+  int high_idx=0;
+
+  memcpy(trim_buffer,buf,n*sizeof(float));
+  int buflen = n;
+
+  for (int j=0; j < max_iter; ++j) {
+    *trimmed_mean = 0;
+    *trimmed_mad = 0;
+    for (int i=1; i < buflen; ++i) {
+      if (trim_buffer[i] < lowest) {
+        low_idx=i;
+        lowest = trim_buffer[i];
+      }
+      if (trim_buffer[i] > highest) {
+        high_idx=i;
+        highest = trim_buffer[i];
+      }
+    } 
+    // all values the same
+    if(low_idx==high_idx) {
+      *trimmed_mean=trim_buffer[0];
+      *trimmed_mad = 0;
+      break;
+    }
+    // compute mean for mad and update trim buffer
+    int trim_idx=0;
+    for (int i=0; i < buflen; ++i) {
+      if (i!=low_idx && i!=high_idx) {
+        *trimmed_mean += (float)trim_buffer[i];
+        ++trim_idx;
+      }
+    }
+    *trimmed_mean = *trimmed_mean/(buflen-2);
+
+    // compute trimmed MAD
+    for (int i=0; i < buflen; ++i) {
+      if (i!=low_idx && i!=high_idx) {
+        *trimmed_mad += abs((float)trim_buffer[i] - *trimmed_mean);
+      }
+    } 
+    *trimmed_mad = *trimmed_mad/(buflen-2);
+
+    // check to see if we need more iterations
+    if (*trimmed_mean > 0) {
+      if(*trimmed_mad/ (*trimmed_mean) < rotor_mad_threshold) {
+        break;
+      }
+    }
+    else if (*trimmed_mean == 0) {
+      break; // only way to get in pos-def values
+    }
+    // another round of trimming
+    // remove low/high vals from trim_buffer
+    for(int k=low_idx; k < buflen-1; ++k) {
+      trim_buffer[k]=trim_buffer[k+1];
+    }
+    for(int k=high_idx; k < buflen-1; ++k) {
+      trim_buffer[k]=trim_buffer[k+1];
+    }
+
+    lowest = trim_buffer[0];
+    highest = trim_buffer[0];
+    buflen = buflen - 2;
+    low_idx = 0;
+    high_idx = 0;
+  } // j
+
 }
 
+static float last_millis = millis();
 // measure time
 void rotorIsr() {
+//    digitalWrite(DEBUG_DIR_PWM_PIN, LOW);
   rotor_wait = false;
-  last_rotor_interrupt = rotor_millis;
+
+  float millis_now = millis();
+  // handle roll-over by not updating value that one time...
+  if (millis_now > last_millis) {
+    last_rotor_interrupt = millis_now - last_millis; //rotor_millis;
+  }
+  last_millis = millis();
+
+  rotor_debounce_buffer[debounce_buf_idx] = last_rotor_interrupt;
+  debounce_buf_idx+=1;
+  if (debounce_buf_idx >= ROTOR_DEBOUNCE_BUFLEN) {
+    debounce_buf_idx = 0; //reset
+  }
+//  float trimmed_rotor_interrupt = trimmed_mean(rotor_debounce_buffer, ROTOR_DEBOUNCE_BUFLEN);
   if (last_rotor_interrupt > 0) {
     last_wind_velocity = ((float)2250)/last_rotor_interrupt;
+    trimmed_mean(rotor_debounce_buffer, ROTOR_DEBOUNCE_BUFLEN, &last_rotor_trimmed_mean, &last_rotor_trimmed_mad);
   }
-  
-  rotor_millis = 0;
+  //rotor_millis = 0;
+//    digitalWrite(DEBUG_DIR_PWM_PIN, HIGH);
 }
 
 
@@ -330,7 +440,7 @@ void setup() {
   // gpio_set_dir(WIND_DIR_PIN, INPUT);
   pinMode(WIND_DIR_PIN, INPUT);
 
-  pinMode(WIND_SPEED_PIN,INPUT);
+  pinMode(WIND_SPEED_PIN,INPUT_PULLUP);
   attachInterrupt(WIND_SPEED_PIN,rotorIsr,FALLING);
 
   // set up PWM outputs for debugging - these simulate the anemometer signals
@@ -429,11 +539,12 @@ void setup() {
   // WiFi stuff
   // configure static IP
 
-  WiFi.config(static_ip,static_dns, static_gateway,static_subnet);
+//  WiFi.config(static_ip,static_dns, static_gateway,static_subnet);
   // Connect to WPA/WPA2 network
   // Just calling begin once and checking status doesn't seem to work
   // repeatedly calling begin after a delay does work though...
   while (wifi_status != WL_CONNECTED) {
+    WiFi.config(static_ip,static_dns, static_gateway,static_subnet);
     wifi_status = WiFi.begin(local_ssid,local_pass);
     tft.print('.');
     // wait for connection:
@@ -537,6 +648,14 @@ void setup() {
       tft.drawBitmap(label_pos[i][0],label_pos[i][1],label_canvases[i]->getBuffer(),label_pos[i][2],label_pos[i][3],label_canvas_colors[i][0],label_canvas_colors[i][1]);
   }
 
+  char llabel[] = "E-W"; 
+  left_button.initButton(&tft,250,450,120,50,TFT_SKYBLUE,TFT_BLACK,TFT_SKYBLUE,llabel,2);
+  left_button.drawButton();
+
+  char rlabel[] = "N-S"; 
+  right_button.initButton(&tft,70,450,120,50,TFT_SKYBLUE,TFT_BLACK,TFT_SKYBLUE,rlabel,2);
+  right_button.drawButton();
+
   // reset loop update clock
   update_millis = 0;
   rotor_millis  = 0;
@@ -548,6 +667,27 @@ void setup() {
       parsePacket(packet);
     });
   }
+}
+
+void set_motor_position(uint16_t tcount) {
+  pulse_no = motor_pulses;
+  last_motor_angle = tcount;
+  gpio_set_function(DEBUG_DIR_PWM_PIN, GPIO_FUNC_PWM);
+  pwm_set_enabled(dirSlice, false);
+  pwm_config dirConfig = pwm_get_default_config();
+  pwm_config_set_wrap(&dirConfig, MOTOR_TOP);
+  pwm_config_set_clkdiv(&dirConfig, MOTOR_CLK_DIV);
+  pwm_init(dirSlice, &dirConfig, false);   
+  // map 0-180 degrees to 0.5-2.5 ms level
+  float time_to_top = ((float)MOTOR_TOP*(float)MOTOR_CLK_DIV)/(float)PICOW_CLK_FREQ;
+  float half_ms_level = (0.0005/time_to_top)*MOTOR_TOP; // pwm_level for for half ms pulse
+  float frac = (float)(tcount)/180.0; // fraction of half-rotation
+  float motor_width = 4*half_ms_level*frac; // add up to 2 ms to base 0.5 ms pulse 
+  uint16_t motor_level = (uint16_t)(MOTOR_TOP - (motor_width + half_ms_level));
+  pwm_set_chan_level(dirSlice, 0, motor_level);
+  pwm_set_irq_enabled(dirSlice, true);
+  pwm_clear_irq(dirSlice);
+  pwm_set_enabled(dirSlice, true);
 }
 
 enum PACKET_COMMANDS {
@@ -650,8 +790,9 @@ void parsePacket(AsyncUDPPacket packet) {
         }
         case PCOMMAND_READ_SPEED_TIMER_RAW:
         {
-          outgoing_packet_buf[2]=(uint8_t)(last_rotor_interrupt&255);
-          outgoing_packet_buf[3]=(uint8_t)((last_rotor_interrupt>>8)&255);
+          uint16_t tlri = (uint16_t)last_rotor_interrupt;
+          outgoing_packet_buf[2]=(uint8_t)(tlri&255);
+          outgoing_packet_buf[3]=(uint8_t)((tlri>>8)&255);
           outgoing_data_len=6;
           checksum_packet(outgoing_packet_buf, outgoing_data_len);
           break;
@@ -688,7 +829,13 @@ void parsePacket(AsyncUDPPacket packet) {
           int16_t scaled_V = (int16_t)(last_wind_velocity*10);
           outgoing_packet_buf[4]=(uint8_t)(scaled_V&255);
           outgoing_packet_buf[5]=(uint8_t)((scaled_V>>8)&255);
-          outgoing_data_len=8;
+          scaled_V = (int16_t)((2250.0/last_rotor_trimmed_mean)*10);
+          outgoing_packet_buf[6]=(uint8_t)(scaled_V&255);
+          outgoing_packet_buf[7]=(uint8_t)((scaled_V>>8)&255);          
+          scaled_V = (int16_t)(last_rotor_trimmed_mad*10);
+          outgoing_packet_buf[8]=(uint8_t)(scaled_V&255);
+          outgoing_packet_buf[9]=(uint8_t)((scaled_V>>8)&255); 
+          outgoing_data_len=12;
           checksum_packet(outgoing_packet_buf, outgoing_data_len);
           break;
         }
@@ -754,24 +901,7 @@ void parsePacket(AsyncUDPPacket packet) {
           outgoing_data_len=6;
           checksum_packet(outgoing_packet_buf, outgoing_data_len);
           if (tcount <= 180) {
-              pulse_no = motor_pulses;
-              last_motor_angle = tcount;
-              gpio_set_function(DEBUG_DIR_PWM_PIN, GPIO_FUNC_PWM);
-              pwm_set_enabled(dirSlice, false);
-              pwm_config dirConfig = pwm_get_default_config();
-              pwm_config_set_wrap(&dirConfig, MOTOR_TOP);
-              pwm_config_set_clkdiv(&dirConfig, MOTOR_CLK_DIV);
-              pwm_init(dirSlice, &dirConfig, false);   
-              // map 0-180 degrees to 0.5-2.5 ms level
-              float time_to_top = ((float)MOTOR_TOP*(float)MOTOR_CLK_DIV)/(float)PICOW_CLK_FREQ;
-              float half_ms_level = (0.0005/time_to_top)*MOTOR_TOP; // pwm_level for for half ms pulse
-              float frac = (float)(tcount)/180.0; // fraction of half-rotation
-              float motor_width = 4*half_ms_level*frac; // add up to 2 ms to base 0.5 ms pulse 
-              uint16_t motor_level = (uint16_t)(MOTOR_TOP - (motor_width + half_ms_level));
-              pwm_set_chan_level(dirSlice, 0, motor_level);
-              pwm_set_irq_enabled(dirSlice, true);
-              pwm_clear_irq(dirSlice);
-              pwm_set_enabled(dirSlice, true);
+              set_motor_position(tcount);
           }
           else last_packet_error = PERR_COUNT_RANGE; 
 
@@ -820,7 +950,30 @@ void parsePacket(AsyncUDPPacket packet) {
 
 void loop() {
 
-  if (update_millis > update_delay) {
+  uint16_t x,y;
+  if (tft.getTouch(&x, &y)) {
+    if (left_button.contains(x,y)) {
+      if (!left_button.isPressed()) {
+        left_button.press(true); 
+        left_button.drawButton(true);
+        gizmo_state = STATE_DO_LEFT_BUTTON;
+      }
+    }
+    else if (right_button.contains(x,y)) {
+      if (!right_button.isPressed()) {
+        right_button.press(true); 
+        right_button.drawButton(true);
+        gizmo_state = STATE_DO_RIGHT_BUTTON;
+      }
+    }
+    else {
+        gizmo_state = STATE_UPDATE;
+      }
+  }
+  else if (pulse_no > 0 && update_millis < update_delay) {
+    gizmo_state = STATE_MOTOR_MOVING;
+  }
+  else if (update_millis > update_delay) {
       gizmo_state = STATE_UPDATE;
       update_millis = 0;
   }
@@ -834,7 +987,6 @@ void loop() {
       // update sensor values
       read_board_T();
       read_vane();
-      read_speed();
       read_bme280();
 
        // update date/time first
@@ -877,16 +1029,47 @@ void loop() {
       // https://www.digitalconcepts.net.au/arduino/index.php?op=DavisWind
       // There is a correction table vs. angle available too: see
       //  https://github.com/kobuki/weewx-meteoRX/tree/master
-      if (last_rotor_interrupt < 5000 && last_rotor_interrupt > 0) {
-        data_canvases[WINDV_CANVAS]->printf("%.1f", (float)(2250)/(float)(last_rotor_interrupt));
+      if (last_rotor_trimmed_mean > 0) {
+          if ((last_rotor_trimmed_mad/last_rotor_trimmed_mean) < rotor_mad_threshold) {       
+            data_canvases[WINDV_CANVAS]->printf("%.1f", 2250.0/last_rotor_trimmed_mean);
+          }
       }
       else {
         data_canvases[WINDV_CANVAS]->printf("0.0");
       }
 
+//      data_canvases[DATA_CANVAS]->fillScreen(TFT_BLACK);
+//      data_canvases[DATA_CANVAS]->setFont(&FreeMonoBold12pt7b);
+//      data_canvases[DATA_CANVAS]->setCursor(5, 40);
+//      data_canvases[DATA_CANVAS]->printf("%.1f %.3f",last_rotor_trimmed_mean, last_rotor_trimmed_mad);
+
       for (int i=0; i < NUM_BITMAPS; ++i) {
           tft.drawBitmap(data_pos[i][0],data_pos[i][1],data_canvases[i]->getBuffer(),data_pos[i][2],data_pos[i][3],data_canvas_colors[i][0],data_canvas_colors[i][1]);
       }
+
+      if (left_button.isPressed()) {
+        left_button.press(false);
+        left_button.drawButton();
+      }
+      if (right_button.isPressed()) {
+        right_button.press(false);
+        right_button.drawButton();
+      }
+
+      break;
+    }
+    case STATE_DO_LEFT_BUTTON: 
+    {
+      set_motor_position(5);
+      break;
+    }
+    case STATE_DO_RIGHT_BUTTON: 
+    {
+      set_motor_position(95);
+      break;
+    }
+    case STATE_MOTOR_MOVING: 
+    {
       break;
     }
     case STATE_WAIT:
