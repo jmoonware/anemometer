@@ -1060,12 +1060,12 @@ void loop() {
     }
     case STATE_DO_LEFT_BUTTON: 
     {
-      set_motor_position(5);
+      set_motor_position(95);
       break;
     }
     case STATE_DO_RIGHT_BUTTON: 
     {
-      set_motor_position(95);
+      set_motor_position(5);
       break;
     }
     case STATE_MOTOR_MOVING: 

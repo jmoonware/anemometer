@@ -1,13 +1,26 @@
 import socket
 import argparse
 import sys
+import struct
 
 class ResponseElement:
-	def __init__(self,name,byte_number,scale=1,element_type=int):
+	def __init__(self,name,byte_number,scale=1,element_type=int,signed=False):
 		self.name = name
 		self.byte_number = byte_number
 		self.scale=scale
 		self.element_type=element_type
+		self.signed = signed
+	def parse(self,raw_bytes,offset=0):
+		slbytes = raw_bytes[offset:offset+self.byte_number]
+		if self.element_type==int:
+			ret = self.element_type.from_bytes(slbytes,'little',signed=self.signed)
+		elif self.element_type==float:
+			[ret] = struct.unpack('<f',slbytes)
+		else:
+			raise ValueError("ResponseElement: parse: unknown type {0}".format(self.element_type))
+		fret = float(ret)/self.scale
+		return(fret)
+		
 
 commands = {
   "PCOMMAND_RESERVED":{'val':0,'responses':
@@ -40,7 +53,7 @@ commands = {
 	'default_payload':bytearray()},
   "PCOMMAND_READ_BME_VALS":{'val':5,'responses':
 	[
-		ResponseElement("bme_T_C", 2,scale=10),
+		ResponseElement("bme_T_C", 2,scale=10,signed=True),
 		ResponseElement("bme_H_perc", 2,scale=10),
 		ResponseElement("bme_P_inHg", 2,scale=100),
 	],
@@ -82,7 +95,7 @@ commands = {
 	[
 		ResponseElement("sent_motor_position_deg", 2),
 	],
-	'default_payload':bytearray([10,0])},
+	'default_payload':bytearray([95,0])},
   "PCOMMAND_SET_BACKLIGHT_LEVEL":{'val':13,'responses':
 	[
 		ResponseElement("sent_backlight_level_perc", 2),
@@ -183,14 +196,8 @@ def parse_received(rec):
 				raise ValueError("Unexpected packet len {0} (expected {1}) in command {2}".format(len(rec), expected_len,command_key))
 			rec_idx=2
 			for rel in commands[command_key]['responses']:
-				# TODO: Handle types (all are unsigned at the moment)
-				parsed_ret[rel.name]=0
-				bits=0
-				for b in rec[rec_idx:rec_idx+rel.byte_number]:
-					parsed_ret[rel.name]+=(b<<bits)
-					bits+=8
+				parsed_ret[rel.name]=rel.parse(rec,rec_idx)
 				rec_idx+=rel.byte_number
-				parsed_ret[rel.name]=float(parsed_ret[rel.name])/rel.scale
 	return(parsed_ret)
 
 ##########################################
