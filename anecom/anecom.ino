@@ -218,14 +218,10 @@ void pwmIrqHandler() {
     else pulse_no--;
   }
 
-
- 
 }
 
 
-static float last_rotor_interrupt = 0; // elapsed millisecs
-static bool rotor_wait = false;
-#define ROTOR_WAIT 65535 // if we never got a trigger then value isn't valid
+static float last_rotor_interrupt_delta = 0; // elapsed millisecs
 static int last_vane_reading = 0;
 static float last_wind_velocity = 0;
 
@@ -396,30 +392,33 @@ void trimmed_mean(float *buf,uint8_t n, float *trimmed_mean, float *trimmed_mad,
 
 }
 
-static float last_millis = millis();
+static float last_rotor_millis = millis();
+// after rotor_timeout seconds, just set wind velocity to zero
+static float rotor_timeout = 8000;
 // measure time
 void rotorIsr() {
 //    digitalWrite(DEBUG_DIR_PWM_PIN, LOW);
-  rotor_wait = false;
 
   float millis_now = millis();
   // handle roll-over by not updating value that one time...
-  if (millis_now > last_millis) {
-    last_rotor_interrupt = millis_now - last_millis; //rotor_millis;
+  if (millis_now > last_rotor_millis) {
+    last_rotor_interrupt_delta = millis_now - last_rotor_millis; //rotor_millis;
   }
-  last_millis = millis();
+  last_rotor_millis = millis();
 
-  rotor_debounce_buffer[debounce_buf_idx] = last_rotor_interrupt;
+  rotor_debounce_buffer[debounce_buf_idx] = last_rotor_interrupt_delta;
   debounce_buf_idx+=1;
   if (debounce_buf_idx >= ROTOR_DEBOUNCE_BUFLEN) {
     debounce_buf_idx = 0; //reset
   }
-//  float trimmed_rotor_interrupt = trimmed_mean(rotor_debounce_buffer, ROTOR_DEBOUNCE_BUFLEN);
-  if (last_rotor_interrupt > 0) {
-    last_wind_velocity = ((float)2250)/last_rotor_interrupt;
-    trimmed_mean(rotor_debounce_buffer, ROTOR_DEBOUNCE_BUFLEN, &last_rotor_trimmed_mean, &last_rotor_trimmed_mad);
+
+  // the untrimmed latest value
+  if (last_rotor_interrupt_delta > 0) {
+    last_wind_velocity = ((float)2250)/last_rotor_interrupt_delta;
   }
-  //rotor_millis = 0;
+    
+  trimmed_mean(rotor_debounce_buffer, ROTOR_DEBOUNCE_BUFLEN, &last_rotor_trimmed_mean, &last_rotor_trimmed_mad);
+
 //    digitalWrite(DEBUG_DIR_PWM_PIN, HIGH);
 }
 
@@ -790,7 +789,7 @@ void parsePacket(AsyncUDPPacket packet) {
         }
         case PCOMMAND_READ_SPEED_TIMER_RAW:
         {
-          uint16_t tlri = (uint16_t)last_rotor_interrupt;
+          uint16_t tlri = (uint16_t)last_rotor_interrupt_delta;
           outgoing_packet_buf[2]=(uint8_t)(tlri&255);
           outgoing_packet_buf[3]=(uint8_t)((tlri>>8)&255);
           outgoing_data_len=6;
@@ -829,7 +828,10 @@ void parsePacket(AsyncUDPPacket packet) {
           int16_t scaled_V = (int16_t)(last_wind_velocity*10);
           outgoing_packet_buf[4]=(uint8_t)(scaled_V&255);
           outgoing_packet_buf[5]=(uint8_t)((scaled_V>>8)&255);
-          scaled_V = (int16_t)((2250.0/last_rotor_trimmed_mean)*10);
+          if (last_rotor_trimmed_mean > 0) {
+            scaled_V = (int16_t)((2250.0/last_rotor_trimmed_mean)*10);
+          }
+          else scaled_V = 0;
           outgoing_packet_buf[6]=(uint8_t)(scaled_V&255);
           outgoing_packet_buf[7]=(uint8_t)((scaled_V>>8)&255);          
           scaled_V = (int16_t)(last_rotor_trimmed_mad*10);
@@ -1029,7 +1031,17 @@ void loop() {
       // https://www.digitalconcepts.net.au/arduino/index.php?op=DavisWind
       // There is a correction table vs. angle available too: see
       //  https://github.com/kobuki/weewx-meteoRX/tree/master
-      if (last_rotor_trimmed_mean > 0) {
+      float rotor_now = millis();
+      if (rotor_now - last_rotor_millis > rotor_timeout) {
+        // briefly disable interrupts
+          noInterrupts();
+          last_rotor_millis = rotor_now;
+          last_rotor_trimmed_mean = 0;
+          last_rotor_trimmed_mad = 0;
+          memset(rotor_debounce_buffer,0,sizeof(float)*ROTOR_DEBOUNCE_BUFLEN);
+          interrupts();
+      }
+      else if (last_rotor_trimmed_mean > 0) {
           if ((last_rotor_trimmed_mad/last_rotor_trimmed_mean) < rotor_mad_threshold) {       
             data_canvases[WINDV_CANVAS]->printf("%.1f", 2250.0/last_rotor_trimmed_mean);
           }
