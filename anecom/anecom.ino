@@ -28,6 +28,9 @@ IPAddress static_subnet(255,255,255,0);
 #include "src/DateTimeNTP/DateTimeNTP.h"
 #include "src/windcal.h"
 
+#define VERSION_STRLEN 9
+char version[] = "202512031";
+
 // Backlight update = 133 MHz/(255*2360) = 221 Hz
 #define BACKLIGHT_DIV 255
 #define BACKLIGHT_TOP 2360
@@ -394,7 +397,7 @@ void trimmed_mean(float *buf,uint8_t n, float *trimmed_mean, float *trimmed_mad,
 
 static float last_rotor_millis = millis();
 // after rotor_timeout seconds, just set wind velocity to zero
-static float rotor_timeout = 8000;
+static float rotor_timeout = 5000;
 // measure time
 void rotorIsr() {
 //    digitalWrite(DEBUG_DIR_PWM_PIN, LOW);
@@ -422,7 +425,7 @@ void rotorIsr() {
 //    digitalWrite(DEBUG_DIR_PWM_PIN, HIGH);
 }
 
-
+// initialize I2C
 TwoWire theWire(i2c0,D0,D1);
 
 void setup() {
@@ -764,7 +767,10 @@ void parsePacket(AsyncUDPPacket packet) {
           outgoing_packet_buf[10]=(uint8_t)((received_packet_count>>8)&255);
           outgoing_packet_buf[11]=(uint8_t)((received_packet_count>>16)&255);
           outgoing_packet_buf[12]=(uint8_t)((received_packet_count>>24)&255);
-          outgoing_data_len=15;
+          for (int i=0; i < VERSION_STRLEN; ++i) {
+            outgoing_packet_buf[i+13]=version[i];
+          }
+          outgoing_data_len=15+VERSION_STRLEN;
           checksum_packet(outgoing_packet_buf, outgoing_data_len);
           break;
         }
@@ -1040,6 +1046,7 @@ void loop() {
           last_rotor_trimmed_mad = 0;
           memset(rotor_debounce_buffer,0,sizeof(float)*ROTOR_DEBOUNCE_BUFLEN);
           interrupts();
+          data_canvases[WINDV_CANVAS]->printf("0.0 *");
       }
       else if (last_rotor_trimmed_mean > 0) {
           if ((last_rotor_trimmed_mad/last_rotor_trimmed_mean) < rotor_mad_threshold) {       

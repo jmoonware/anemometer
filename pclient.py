@@ -16,9 +16,14 @@ class ResponseElement:
 			ret = self.element_type.from_bytes(slbytes,'little',signed=self.signed)
 		elif self.element_type==float:
 			[ret] = struct.unpack('<f',slbytes)
+		elif self.element_type==str:
+			ret = slbytes.decode()
 		else:
 			raise ValueError("ResponseElement: parse: unknown type {0}".format(self.element_type))
-		fret = float(ret)/self.scale
+		if self.element_type != str:
+			fret = float(ret)/self.scale
+		else:
+			fret=ret
 		return(fret)
 		
 
@@ -34,6 +39,7 @@ commands = {
 		ResponseElement("motor_deg", 1),
 		ResponseElement("board_T_C", 2, scale=10),
 		ResponseElement("packet_count", 4),
+		ResponseElement("version", 9,element_type=str),
 	],
 	'default_payload':bytearray()},
   "PCOMMAND_UPTIME":{'val':2,'responses':
