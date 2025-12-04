@@ -1,0 +1,9 @@
+[project]
+name = "anemometer"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "jedi-language-server>=0.46.0",
+]

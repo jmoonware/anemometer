@@ -39,8 +39,8 @@ uint8_t backlight_pwm_slice;
 
 // here "physical pin" means pins 1-40 of the Pico W board
 #define DEBUG_DIR_PWM_PIN D6 // physical pin 9, black wire, also motor PWM
-#define DEBUG_SPEED_PWM_PIN D4 // physical pin 6, white wire
-#define DEBUG_SPEED_ISR_PIN D3 // physical pin 5
+#define DEBUG_SPEED_PWM_PIN D4 // physical pin 6
+#define DEBUG_SPEED_ISR_PIN D3 // physical pin 5, white wire
 // 133/(522*255) ==> 1.0008 ms per interrupt
 #define DEBUG_SPEED_ISR_TOP 522 // clock cycles (possibly pre-divided) to generate IRQ
 #define DEBUG_SPEED_ISR_CLK_DIV 255 // pre-divide 133 MHz clock by this
