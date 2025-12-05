@@ -39,7 +39,8 @@ commands = {
 		ResponseElement("motor_deg", 1),
 		ResponseElement("board_T_C", 2, scale=10),
 		ResponseElement("packet_count", 4),
-		ResponseElement("version", 9,element_type=str),
+		ResponseElement("bme_update_s", 2, scale=1000),
+		ResponseElement("version", 9, element_type=str),
 	],
 	'default_payload':bytearray()},
   "PCOMMAND_UPTIME":{'val':2,'responses':
@@ -105,6 +106,11 @@ commands = {
   "PCOMMAND_SET_BACKLIGHT_LEVEL":{'val':13,'responses':
 	[
 		ResponseElement("sent_backlight_level_perc", 2),
+	],
+	'default_payload':bytearray([50,0])},
+  "PCOMMAND_SET_THP_UPDATE_TIME":{'val':14,'responses':
+	[
+		ResponseElement("sent_thp_update_time_s", 2),
 	],
 	'default_payload':bytearray([50,0])},
 }

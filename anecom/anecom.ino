@@ -29,7 +29,7 @@ IPAddress static_subnet(255,255,255,0);
 #include "src/windcal.h"
 
 #define VERSION_STRLEN 9
-char version[] = "202512031";
+char version[] = "202512051";
 
 // Backlight update = 133 MHz/(255*2360) = 221 Hz
 #define BACKLIGHT_DIV 255
@@ -77,8 +77,10 @@ unsigned char outgoing_packet_buf[OUTGOING_UDP_PACKET_SZ];
 
 elapsedMillis rotor_millis;
 elapsedMillis update_millis;
+elapsedMillis bme_update_millis;
 
 uint32_t update_delay = 1*1000; // ms, for raw sensor data
+uint32_t bme_update_delay = 60*1000; // ms, for BME T/H/P sensor 
 
 enum GIZMO_STATES {
   STATE_UPDATE,
@@ -228,21 +230,27 @@ static float last_rotor_interrupt_delta = 0; // elapsed millisecs
 static int last_vane_reading = 0;
 static float last_wind_velocity = 0;
 
-static float last_board_T = -1;
+static float last_board_T = -999;
 
 Adafruit_BME280 theBME280; // = Adafruit_BME280();
-static float last_bme280_temperature;
-static float last_bme280_humidity;
-static float last_bme_280_pressure;
+static float last_bme280_temperature=0;
+static float last_bme280_humidity=0;
+static float last_bme_280_pressure=0;
 
 
 void read_bme280() 
 {
-  last_bme280_temperature = theBME280.readTemperature();
-  last_bme280_humidity = theBME280.readHumidity();
-  last_bme_280_pressure = theBME280.readPressure();
+  // The BME280 will read the sensors once (storing in registers)
+  // then go back to sleep in "forced" mode.
+  // Otherwise, it is continuously updating the registers with t_sb delay
+  // the Adafruit lib defaults to 250 ms delay, which is enough to heat 
+  // the sensor
+  if(theBME280.takeForcedMeasurement()) {
+    last_bme280_temperature = theBME280.readTemperature();
+    last_bme280_humidity = theBME280.readHumidity();
+    last_bme_280_pressure = theBME280.readPressure();
+  }
 
- 
 }
 
 
@@ -595,6 +603,11 @@ void setup() {
     delay(1000);
   }
 
+  // set to forced mode
+  if (bme_status) {
+    theBME280.setSampling(Adafruit_BME280::sensor_mode::MODE_FORCED);
+  }
+
 
   // x0,x1,y0,y1,ctl = [bits from LSB: 1=rotate,2=invertx,3=inverty]
   // NOTE: Calibration values are RAW extent values - which are between ~300-3600 in both X and Y
@@ -661,6 +674,7 @@ void setup() {
   // reset loop update clock
   update_millis = 0;
   rotor_millis  = 0;
+  bme_update_millis = bme_update_delay;
 
 
   // set up UDP 
@@ -706,7 +720,8 @@ enum PACKET_COMMANDS {
   PCOMMAND_SET_ISR_HIGH_COUNT,
   PCOMMAND_SET_DAC_LEVEL, 
   PCOMMAND_SET_MOTOR_POSITION,
-  PCOMMAND_SET_BACKLIGHT_LEVEL
+  PCOMMAND_SET_BACKLIGHT_LEVEL,
+  PCOMMAND_SET_THP_UPDATE_TIME
 };
 
 enum PACKET_ERRORS {
@@ -767,10 +782,12 @@ void parsePacket(AsyncUDPPacket packet) {
           outgoing_packet_buf[10]=(uint8_t)((received_packet_count>>8)&255);
           outgoing_packet_buf[11]=(uint8_t)((received_packet_count>>16)&255);
           outgoing_packet_buf[12]=(uint8_t)((received_packet_count>>24)&255);
+          outgoing_packet_buf[13]=(uint8_t)(bme_update_delay&255);
+          outgoing_packet_buf[14]=(uint8_t)((bme_update_delay>>8)&255);
           for (int i=0; i < VERSION_STRLEN; ++i) {
-            outgoing_packet_buf[i+13]=version[i];
+            outgoing_packet_buf[i+15]=version[i];
           }
-          outgoing_data_len=15+VERSION_STRLEN;
+          outgoing_data_len=17+VERSION_STRLEN;
           checksum_packet(outgoing_packet_buf, outgoing_data_len);
           break;
         }
@@ -930,6 +947,19 @@ void parsePacket(AsyncUDPPacket packet) {
           else last_packet_error = PERR_COUNT_RANGE; 
           break;
         }
+        case PCOMMAND_SET_THP_UPDATE_TIME:
+        {
+          uint16_t tcount = (uint16_t)incoming_packet_buf[2]+(((uint16_t)incoming_packet_buf[3])<<8);
+          outgoing_packet_buf[2]=(uint8_t)(tcount&255);
+          outgoing_packet_buf[3]=(uint8_t)((tcount>>8)&255);
+          outgoing_data_len=6;
+          checksum_packet(outgoing_packet_buf, outgoing_data_len);
+          if (tcount < 3600) { // max 1 hour
+            bme_update_delay = tcount*1000; // ms 
+          }
+          else last_packet_error = PERR_COUNT_RANGE; 
+          break;
+        }
 
         default:
         {
@@ -995,7 +1025,10 @@ void loop() {
       // update sensor values
       read_board_T();
       read_vane();
-      read_bme280();
+      if (bme_update_millis >= bme_update_delay) {
+        read_bme280();
+        bme_update_millis=0;
+      }
 
        // update date/time first
       dtntp.get_date();
