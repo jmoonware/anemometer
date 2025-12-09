@@ -7589,7 +7589,7 @@
 				)
 			)
 		)
-		(property "Value" "1N4148WT"
+		(property "Value" "1N5817 Schottky"
 			(at 50.8 17.78 0)
 			(effects
 				(font

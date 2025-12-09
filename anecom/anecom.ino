@@ -29,7 +29,7 @@ IPAddress static_subnet(255,255,255,0);
 #include "src/windcal.h"
 
 #define VERSION_STRLEN 9
-char version[] = "202512051";
+char version[] = "202512091";
 
 // Backlight update = 133 MHz/(255*2360) = 221 Hz
 #define BACKLIGHT_DIV 255
@@ -605,7 +605,7 @@ void setup() {
 
   // set to forced mode
   if (bme_status) {
-    theBME280.setSampling(Adafruit_BME280::sensor_mode::MODE_FORCED);
+    theBME280.setSampling(Adafruit_BME280::sensor_mode::MODE_FORCED,Adafruit_BME280::SAMPLING_X1,Adafruit_BME280::SAMPLING_X1,Adafruit_BME280::SAMPLING_X1);
   }
 
 
