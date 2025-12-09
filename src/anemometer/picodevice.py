@@ -1,7 +1,7 @@
 import socket
 import argparse
 import logging
-from picoxface import *
+from anemometer.picoxface import *
 
 class PicoDevice():
 	def __init__(self,dest='192.168.1.10',port=8225,timeout=2,echo=False):

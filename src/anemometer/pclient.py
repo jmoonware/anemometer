@@ -2,7 +2,7 @@ import socket
 import argparse
 import sys
 import struct
-from picoxface import *
+from anemometer.picoxface import *
 import logging
 import logging.handlers
 
