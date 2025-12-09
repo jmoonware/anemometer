@@ -1,0 +1,12 @@
+LICENSE
+README.md
+pyproject.toml
+src/pclient.py
+src/picodevice.py
+src/picoxface.py
+src/windcal.py
+src/anemometer.egg-info/PKG-INFO
+src/anemometer.egg-info/SOURCES.txt
+src/anemometer.egg-info/dependency_links.txt
+src/anemometer.egg-info/requires.txt
+src/anemometer.egg-info/top_level.txt
