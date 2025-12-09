@@ -1,9 +1,15 @@
 [project]
 name = "anemometer"
 version = "0.1.0"
-description = "Add your description here"
+description = "Python interface code for Pico W anemometer weather station"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "jedi-language-server>=0.46.0",
 ]
+
+[tool.uv.build-backend]
+source-exclude = ['anecom']
+
+[tool.uv.workspace]
+exclude = ['anecom']
