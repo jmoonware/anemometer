@@ -53,9 +53,9 @@ class response_pico_thp(Enum):
 		return(self.name)
 
 class response_pico_wind(Enum):
-	wind_A_deg = auto() 
-	wind_V_mph_last = auto()
-	wind_V_mph = auto()
+	wind_a_deg = auto() 
+	wind_v_mph_last = auto()
+	wind_v_mph = auto()
 	rotor_mad_ms = auto()
 	def __str__(self):
 		return(self.name)
@@ -110,9 +110,9 @@ pico_commands = {
 	'default_payload':bytearray()},
   str(pcn.PCOMMAND_READ_WIND_VALS):{'val':pcn.PCOMMAND_READ_WIND_VALS.value,'responses':
 	[
-		ResponseElement(str(response_pico_wind.wind_A_deg), 2,scale=10),
-		ResponseElement(str(response_pico_wind.wind_V_mph_last), 2,scale=10),
-		ResponseElement(str(response_pico_wind.wind_V_mph), 2,scale=10),
+		ResponseElement(str(response_pico_wind.wind_a_deg), 2,scale=10),
+		ResponseElement(str(response_pico_wind.wind_v_mph_last), 2,scale=10),
+		ResponseElement(str(response_pico_wind.wind_v_mph), 2,scale=10),
 		ResponseElement(str(response_pico_wind.rotor_mad_ms), 2,scale=10),
 	],
 	'default_payload':bytearray()},
@@ -163,7 +163,7 @@ NACK = 0x15
 
 def pack16(val):
 	ret = bytearray()
-	if len(val) > 0:
+	if val and len(val) > 0:
 		try:
 			ival = int(float(val))
 			ret.append(ival&255)

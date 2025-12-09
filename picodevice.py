@@ -4,7 +4,7 @@ import logging
 from picoxface import *
 
 class PicoDevice():
-	def __init__(self,destaddr='192.168.1.10',port=8225,timeout=2,echo=False):
+	def __init__(self,dest='192.168.1.10',port=8225,timeout=2,echo=False):
 		self.dest=dest
 		self.port=port
 		self.timeout=timeout
@@ -18,9 +18,9 @@ class PicoDevice():
 	def ReadTHP(self):
 		return(self.Command(str(pcn.PCOMMAND_READ_BME_VALS),expected_response=response_pico_thp))
 	def Status(self):
-		pass
+		return(self.Command(str(pcn.PCOMMAND_STATUS),expected_response=response_pico_status))
 	def Command(self,command_key,command_value=None,expected_response=None):
-		res = parse_received(send_packet(sock,self.dest.dest,self.port,self.timeout,pico_commands[command_key]['val'],pack16(command_value),echo=self.echo))
+		res = parse_received(send_packet(self.socket,self.dest,self.port,self.timeout,pico_commands[command_key]['val'],pack16(command_value),echo=self.echo))
 		if expected_response:
 			if res and len(res)==len(expected_response):
 				return(res)
