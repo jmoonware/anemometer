@@ -173,6 +173,14 @@ def pack16(val):
 	return(ret)
 
 def send_packet(sock, dest, port, timeout, command, command_payload_bytes=None, echo=False,ackbyte=ACK):
+	# default response
+	rec_msg = bytearray()
+	rec_msg.append(int(NACK))
+	rec_msg.append(0)
+	rec_msg.append(0)
+	rec_msg.append(0)
+
+	# build payload
 	payload = bytearray()
 	payload.append(int(ACK))
 	payload.append(int(command))
