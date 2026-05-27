@@ -44,6 +44,7 @@ class DateTimeNTP
 	public:
 		DateTimeNTP(NTPClient *client);
 		bool start(); // true if successful
+		void end(); 
 		bool get_date(uint32_t inputSecs = 0);
 		char time_cstring[32]; // [] = "00 : 00 : 00 AM EST";
 		char date_cstring[32]; // [] = "MON JAN XX, 2023";

@@ -2,6 +2,9 @@
 #include <NTPClient.h>
 #include <AsyncUDP_RP2040W.h>
 #include <Adafruit_BME280.h>
+#include <hardware/watchdog.h>
+
+#define WATCHDOG_DELAY_MS 5000
 
 // secret, contains definition of local_ssid, local_pass, and data_url in three lines, literally: 
 // char local_ssid[] = "NNN";  //  your network SSID (name)
@@ -29,7 +32,7 @@ IPAddress static_subnet(255,255,255,0);
 #include "src/windcal.h"
 
 #define VERSION_STRLEN 9
-char version[] = "202512091";
+char version[] = "202605261";
 
 // Backlight update = 133 MHz/(255*2360) = 221 Hz
 #define BACKLIGHT_DIV 255
@@ -64,6 +67,7 @@ uint8_t speedSlice;
 WiFiUDP ntpUDP;
 NTPClient theNTPUDPClient(ntpUDP);
 DateTimeNTP dtntp(&theNTPUDPClient);
+#define NTP_RETRIES 3 
 int wifi_status = WL_IDLE_STATUS;     // the Wifi radio's status
 
 // UDP stuff
@@ -78,18 +82,30 @@ unsigned char outgoing_packet_buf[OUTGOING_UDP_PACKET_SZ];
 elapsedMillis rotor_millis;
 elapsedMillis update_millis;
 elapsedMillis bme_update_millis;
+elapsedMillis wifi_millis = 0;
 
 uint32_t update_delay = 1*1000; // ms, for raw sensor data
 uint32_t bme_update_delay = 60*1000; // ms, for BME T/H/P sensor 
+uint32_t wifi_update_delay = 60*1000; // ms, for checking if we need to attempt a reconnect
 
 enum GIZMO_STATES {
   STATE_UPDATE,
   STATE_DO_LEFT_BUTTON,
   STATE_DO_RIGHT_BUTTON,
   STATE_MOTOR_MOVING,
+  STATE_CHECK_WIFI,
   STATE_WAIT
 };
 uint8_t gizmo_state;
+
+enum GIZMO_ERRORS {
+  ERROR_NONE = 0,
+  ERROR_NTP_INIT = 1,
+  ERROR_BMEA_INIT = 2,
+  ERROR_BMEB_INIT = 4,
+  ERROR_WATCHDOG_REBOOT = 8, 
+};
+static uint16_t gizmo_error_reg = 0;
 
 enum BITMAP_NAMES {
   DATE_CANVAS,
@@ -226,9 +242,7 @@ void pwmIrqHandler() {
 }
 
 
-static float last_rotor_interrupt_delta = 0; // elapsed millisecs
-static int last_vane_reading = 0;
-static float last_wind_velocity = 0;
+
 
 static float last_board_T = -999;
 
@@ -284,6 +298,7 @@ char wind_angle_labels[][3] = {
 };
 
 char angle_dir[] = "XX";
+static int last_vane_reading = 0;
 
 // measure analog voltage
 void read_vane() {
@@ -323,13 +338,16 @@ float last_rotor_trimmed_mean=0;
 float last_rotor_trimmed_mad=0;
 float rotor_mad_threshold = 0.3;
 
-
+void timeout_rotor_debounce_buffer() {
+  // set to a large value
+  for (int i=0; i < ROTOR_DEBOUNCE_BUFLEN; ++i) {
+    rotor_debounce_buffer[i]=2e6;
+  }
+}
 // iterative outlier removal
 // will converge on median
 // assumes positive-definte values 
-void trimmed_mean(float *buf,uint8_t n, float *trimmed_mean, float *trimmed_mad, int max_iter=2) {
-
-
+void calc_trimmed_mean(float *buf,uint8_t n, float *trimmed_mean, float *trimmed_mad, int max_iter=2) {
   // trim highest, lowest and average remaining
   float lowest = buf[0];
   float highest = buf[0];
@@ -403,53 +421,178 @@ void trimmed_mean(float *buf,uint8_t n, float *trimmed_mean, float *trimmed_mad,
 
 }
 
-static float last_rotor_millis = millis();
+#define DEBOUNCE_US 500
+
+static float last_rotor_interrupt_delta = 0; // elapsed millisecs
+static float last_wind_velocity = 0;
+
+volatile float last_rotor_millis = millis();
+volatile float rotor_isr_now = millis();
 // after rotor_timeout seconds, just set wind velocity to zero
-static float rotor_timeout = 5000;
-// measure time
+volatile float rotor_timeout = 5000;
+volatile unsigned long last_valid_edge_micros = 0;
+volatile bool edgeCheckPending = false;
+
+// alarm function to check if the falling edge turned into low signal (not just a glitch) 
+int64_t confirmEdgeLow(alarm_id_t id, void *user_data) {
+  edgeCheckPending = false;
+
+  // Confirm that the signal is still low after debounce interval
+  if (digitalRead(WIND_SPEED_PIN) == LOW) {
+    if (rotor_isr_now > last_rotor_millis && last_rotor_millis != 0) {
+      last_rotor_interrupt_delta = rotor_isr_now - last_rotor_millis; 
+    }
+    last_rotor_millis = rotor_isr_now;
+  
+    rotor_debounce_buffer[debounce_buf_idx] = last_rotor_interrupt_delta;
+    debounce_buf_idx+=1;
+    if (debounce_buf_idx >= ROTOR_DEBOUNCE_BUFLEN) {
+      debounce_buf_idx = 0; //reset
+    }
+    calc_trimmed_mean(rotor_debounce_buffer, ROTOR_DEBOUNCE_BUFLEN, &last_rotor_trimmed_mean, &last_rotor_trimmed_mad);
+    // the untrimmed latest value
+    if (last_rotor_interrupt_delta > 0) {
+      last_wind_velocity = ((float)2250)/last_rotor_interrupt_delta;
+    }
+  }
+  return 0;   // one-shot alarm
+}
+
+// this is triggered on falling edge of rotor switch
+// It sets an alarm later which checks that the signal remains low for at least DEBOUNCE_US
 void rotorIsr() {
 //    digitalWrite(DEBUG_DIR_PWM_PIN, LOW);
 
-  float millis_now = millis();
-  // handle roll-over by not updating value that one time...
-  if (millis_now > last_rotor_millis) {
-    last_rotor_interrupt_delta = millis_now - last_rotor_millis; //rotor_millis;
-  }
-  last_rotor_millis = millis();
-
-  rotor_debounce_buffer[debounce_buf_idx] = last_rotor_interrupt_delta;
-  debounce_buf_idx+=1;
-  if (debounce_buf_idx >= ROTOR_DEBOUNCE_BUFLEN) {
-    debounce_buf_idx = 0; //reset
+  if (edgeCheckPending) {
+    return;   // ignore additional noise while validation is pending
   }
 
-  // the untrimmed latest value
-  if (last_rotor_interrupt_delta > 0) {
-    last_wind_velocity = ((float)2250)/last_rotor_interrupt_delta;
-  }
-    
-  trimmed_mean(rotor_debounce_buffer, ROTOR_DEBOUNCE_BUFLEN, &last_rotor_trimmed_mean, &last_rotor_trimmed_mad);
-
+  rotor_isr_now = millis();
+  edgeCheckPending = true;
+  add_alarm_in_us(DEBOUNCE_US, confirmEdgeLow, NULL, false);
+  
 //    digitalWrite(DEBUG_DIR_PWM_PIN, HIGH);
 }
 
 // initialize I2C
 TwoWire theWire(i2c0,D0,D1);
 
+void start_screen() {
+
+  // nothing was coming out of pins from scope so had to do this manually
+  gpio_set_function(TFT_CS, GPIO_FUNC_SPI);
+  gpio_set_function(TFT_SCLK, GPIO_FUNC_SPI);
+  gpio_set_function(TFT_MOSI, GPIO_FUNC_SPI);
+  gpio_set_function(TFT_MISO, GPIO_FUNC_SPI);
+
+  tft.init();
+
+  // can use PWM on this pin to dim screen - TODO
+  pinMode(TFT_BL, OUTPUT); // GPIO13 = PWM 6B 
+  gpio_set_function(TFT_BL, GPIO_FUNC_PWM);
+  backlight_pwm_slice = pwm_gpio_to_slice_num(TFT_BL);
+  pwm_config backlightConfig = pwm_get_default_config();
+  pwm_config_set_wrap(&backlightConfig, BACKLIGHT_TOP); // with 255 prescaling, gets to 220 Hz  
+  pwm_init(backlight_pwm_slice, &backlightConfig, true);
+  pwm_set_chan_level(backlight_pwm_slice, 1, BACKLIGHT_TOP-1); // initial value
+  pwm_set_clkdiv_int_frac(backlight_pwm_slice, BACKLIGHT_DIV, 0); // 133 MHz/255 = 521.6 kHz clock freq
+
+  tft.setRotation(2);
+  tft.fillScreen((TFT_BLACK));
+
+  // DO NOT use the Adafruit_GFX fonts! 
+  //  tft.setFreeFont(&FreeSerif9pt7b); 
+  tft.setTextFont(2);
+  tft.setTextSize(2);
+//  tft.setCursor(20, 0, 2);
+  tft.setTextColor(TFT_SKYBLUE);
+  tft.println(" ");
+  tft.println("Hello!");
+  tft.setTextColor(TFT_GREEN); 
+  tft.println("Hello!");
+  tft.setTextColor(TFT_RED); 
+  tft.println("Hello!");
+  tft.setTextColor(TFT_WHITE);
+  tft.println("Connecting"); 
+
+
+}
+
+
+///////////////////////////////
+// Checks if wifi is connected and attempts to reconnect if not
+///////////////////////////////
+
+void check_wifi() {
+
+  wifi_status = WiFi.status();
+
+  // if we are connected don't do anything
+  if (wifi_status != WL_CONNECTED) {
+    tft.printf("status=%d",wifi_status);
+    while (wifi_status != WL_CONNECTED) {
+      watchdog_update();
+      WiFi.config(static_ip,static_dns, static_gateway,static_subnet);
+      wifi_status = WiFi.begin(local_ssid,local_pass);
+      digitalWrite(PIN_LED, HIGH);
+      delay(100);
+      digitalWrite(PIN_LED, LOW);
+      // wait for connection:
+      delay(1000);
+    }
+
+    // start the date time NTP updates
+    // FIXME
+    // For some reason this can fail 
+    // restarting the WiFi seems to fix the failure 
+    uint8_t retries = 0;
+    dtntp.end();
+    while (!dtntp.start() && retries < NTP_RETRIES) {
+      watchdog_update();
+      wifi_status = WiFi.disconnect();
+      while (wifi_status != WL_CONNECTED) {
+        watchdog_update();
+        WiFi.config(static_ip,static_dns, static_gateway,static_subnet);
+        wifi_status = WiFi.begin(local_ssid,local_pass);
+        // wait for connection:
+        delay(1000);
+      }
+      delay(1000);
+      retries+=1;
+    }
+    if (retries==NTP_RETRIES) {
+      gizmo_error_reg|=ERROR_NTP_INIT;
+      // quick blinks for failure
+      for (int i=0; i < 2; ++i) {
+        digitalWrite(PIN_LED, HIGH);
+        delay(200);
+        digitalWrite(PIN_LED, LOW);
+        delay(200);
+      }
+    }
+  }
+}
+
+
 void setup() {
   // put your setup code here, to run once:
 
 //  Serial.begin(9600);
 
+  // initial flash to indicate we are starting setup
   digitalWrite(PIN_LED, HIGH);
   delay(300);
   digitalWrite(PIN_LED, LOW);
   delay(100);
 
-  // set up sensor pins for wind measurement
-  // gpio_set_dir(WIND_DIR_PIN, INPUT);
-  pinMode(WIND_DIR_PIN, INPUT);
+  // start screen
+  start_screen();
 
+  // initialize rotor buffer
+  timeout_rotor_debounce_buffer();
+
+  // set up sensor pins for wind measurement
+  pinMode(WIND_DIR_PIN, INPUT);
   pinMode(WIND_SPEED_PIN,INPUT_PULLUP);
   attachInterrupt(WIND_SPEED_PIN,rotorIsr,FALLING);
 
@@ -459,7 +602,6 @@ void setup() {
   pinMode(DEBUG_DIR_PWM_PIN,OUTPUT);
   digitalWrite(DEBUG_DIR_PWM_PIN, HIGH);
 //  delay(100);
-
 
   // set up output pin for simualated reed switch pulse
   pinMode(DEBUG_SPEED_ISR_PIN,OUTPUT);
@@ -508,43 +650,7 @@ void setup() {
   pwm_set_irq_enabled(dirSlice, true);
   pwm_clear_irq(dirSlice);
 
-// nothing was coming out of pins from scope so had to do this manually
-  gpio_set_function(TFT_CS, GPIO_FUNC_SPI);
-  gpio_set_function(TFT_SCLK, GPIO_FUNC_SPI);
-  gpio_set_function(TFT_MOSI, GPIO_FUNC_SPI);
-  gpio_set_function(TFT_MISO, GPIO_FUNC_SPI);
 
-
-  tft.init();
-
-  // can use PWM on this pin to dim screen - TODO
-  pinMode(TFT_BL, OUTPUT); // GPIO13 = PWM 6B 
-  gpio_set_function(TFT_BL, GPIO_FUNC_PWM);
-  backlight_pwm_slice = pwm_gpio_to_slice_num(TFT_BL);
-  pwm_config backlightConfig = pwm_get_default_config();
-  pwm_config_set_wrap(&backlightConfig, BACKLIGHT_TOP); // with 255 prescaling, gets to 220 Hz  
-  pwm_init(backlight_pwm_slice, &backlightConfig, true);
-  pwm_set_chan_level(backlight_pwm_slice, 1, BACKLIGHT_TOP-1); // initial value
-  pwm_set_clkdiv_int_frac(backlight_pwm_slice, BACKLIGHT_DIV, 0); // 133 MHz/255 = 521.6 kHz clock freq
-
-  tft.setRotation(2);
-  tft.fillScreen((TFT_BLACK));
-
-
-  // DO NOT use the Adafruit_GFX fonts! 
-  //  tft.setFreeFont(&FreeSerif9pt7b); 
-  tft.setTextFont(2);
-  tft.setTextSize(2);
-//  tft.setCursor(20, 0, 2);
-  tft.setTextColor(TFT_SKYBLUE);
-  tft.println(" ");
-  tft.println("Hello!");
-  tft.setTextColor(TFT_GREEN); 
-  tft.println("Hello!");
-  tft.setTextColor(TFT_RED); 
-  tft.println("Hello!");
-  tft.setTextColor(TFT_WHITE);
-  tft.println("Connecting"); 
 
   // WiFi stuff
   // configure static IP
@@ -562,7 +668,7 @@ void setup() {
   }
 
   // start the date time NTP updates
-  #define NTP_RETRIES 3 
+
   tft.println("");
   tft.println("Starting NTP...");
   uint8_t retries = 0;
@@ -581,6 +687,7 @@ void setup() {
     retries+=1;
   }
   if (retries==NTP_RETRIES) {
+    gizmo_error_reg|=ERROR_NTP_INIT;
     tft.print("Cannot start NTP service");
   }
 
@@ -603,9 +710,12 @@ void setup() {
     delay(1000);
   }
 
-  // set to forced mode
+  // set to forced mode or indicate error
   if (bme_status) {
     theBME280.setSampling(Adafruit_BME280::sensor_mode::MODE_FORCED,Adafruit_BME280::SAMPLING_X1,Adafruit_BME280::SAMPLING_X1,Adafruit_BME280::SAMPLING_X1);
+  }
+  else {
+    gizmo_error_reg |= ERROR_BMEA_INIT;
   }
 
 
@@ -619,7 +729,6 @@ void setup() {
   tft.fillScreen(TFT_BLACK);
   tft.setCursor(0,0);
   tft.println("");
-
 
 
   // allocate canvases for rendering
@@ -675,6 +784,7 @@ void setup() {
   update_millis = 0;
   rotor_millis  = 0;
   bme_update_millis = bme_update_delay;
+  wifi_millis = 0;
 
 
   // set up UDP 
@@ -683,6 +793,14 @@ void setup() {
       parsePacket(packet);
     });
   }
+
+  // finally, enable watchdog timer; if it hasn't been updated in this many secs then something is wrong and time to reboot
+  watchdog_enable(WATCHDOG_DELAY_MS, false);
+  // this will be set if we were rebooted through the watchdog 
+  if (watchdog_enable_caused_reboot()) {
+    gizmo_error_reg |= ERROR_WATCHDOG_REBOOT;
+  }
+
 }
 
 void set_motor_position(uint16_t tcount) {
@@ -715,6 +833,7 @@ enum PACKET_COMMANDS {
   PCOMMAND_READ_BME_VALS,
   PCOMMAND_READ_WIND_VALS,
   PCOMMAND_READ_BOARD_T, 
+  PCOMMAND_READ_LAST_ERR, 
   PCOMMAND_NUM_READ_COMMANDS,
   PCOMMAND_SET_ISR_LOW_COUNT,
   PCOMMAND_SET_ISR_HIGH_COUNT,
@@ -864,6 +983,14 @@ void parsePacket(AsyncUDPPacket packet) {
           checksum_packet(outgoing_packet_buf, outgoing_data_len);
           break;
         }
+        case PCOMMAND_READ_LAST_ERR:
+        {
+          outgoing_packet_buf[2]=(uint8_t)(gizmo_error_reg&255);
+          outgoing_packet_buf[3]=(uint8_t)((gizmo_error_reg>>8)&255);
+          outgoing_data_len=6;
+          checksum_packet(outgoing_packet_buf, outgoing_data_len);
+          break;
+        }
         case PCOMMAND_SET_ISR_LOW_COUNT:
         {
           uint16_t tcount = (uint16_t)incoming_packet_buf[2]+(((uint16_t)incoming_packet_buf[3])<<8);
@@ -988,6 +1115,8 @@ void parsePacket(AsyncUDPPacket packet) {
 
 void loop() {
 
+  watchdog_update();
+
   uint16_t x,y;
   if (tft.getTouch(&x, &y)) {
     if (left_button.contains(x,y)) {
@@ -1011,15 +1140,28 @@ void loop() {
   else if (pulse_no > 0 && update_millis < update_delay) {
     gizmo_state = STATE_MOTOR_MOVING;
   }
+  else if (wifi_millis > wifi_update_delay) {
+      gizmo_state = STATE_CHECK_WIFI;
+  }
   else if (update_millis > update_delay) {
       gizmo_state = STATE_UPDATE;
       update_millis = 0;
+      digitalWrite(PIN_LED, HIGH);
+      delay(50);
+      digitalWrite(PIN_LED, LOW);
   }
   else {
     gizmo_state = STATE_WAIT;
   }
 
   switch (gizmo_state) {
+    case STATE_CHECK_WIFI:
+    {
+      wifi_millis = 0;
+      // make sure wifi is still connected
+      check_wifi();
+      break;
+    }
     case STATE_UPDATE:
     {
       // update sensor values
@@ -1077,7 +1219,10 @@ void loop() {
           last_rotor_millis = rotor_now;
           last_rotor_trimmed_mean = 0;
           last_rotor_trimmed_mad = 0;
-          memset(rotor_debounce_buffer,0,sizeof(float)*ROTOR_DEBOUNCE_BUFLEN);
+          timeout_rotor_debounce_buffer();
+//        setting to 0 is not right - the next value could be very small and outlier trimming will 
+//        provide a perfectly valid very small interrpt time, leading to spurious high velocity readings
+//          memset(rotor_debounce_buffer,0,sizeof(float)*ROTOR_DEBOUNCE_BUFLEN);
           interrupts();
           data_canvases[WINDV_CANVAS]->printf("0.0 *");
       }

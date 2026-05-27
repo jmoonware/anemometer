@@ -22,6 +22,10 @@ bool DateTimeNTP::start() {
 	return(success);
 }
 
+void DateTimeNTP::end() {
+	this->_timeClient->end();
+}
+
 // sets month offsets for given (possibly Leap) year
 uint8_t DateTimeNTP::check_leap_year(uint16_t year) {
 

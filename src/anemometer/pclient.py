@@ -2,7 +2,6 @@ import socket
 import argparse
 import sys
 import struct
-from anemometer.picoxface import *
 import logging
 import logging.handlers
 
@@ -17,12 +16,18 @@ ap.add_argument('-cv','--command_values',help='Command payload values (series of
 ap.add_argument('-n','--name',help='Command name',required=False,default='')
 ap.add_argument('-nv','--value',help='Command value (if required)',required=False,default='')
 ap.add_argument('-b','--base',help='Interpret command payload values as this base 16 is default, 10 is most likely other value ',required=False,default=16)
-ap.add_argument('-ack','--ackbyte',help='Packet ack byte (for testing)',required=False,default=ACK)
+ap.add_argument('-ack','--ackbyte',help='Packet ack byte (for testing)',required=False,default=6)
 ap.add_argument('-t','--timeout',help='Timeout in seconds (float format)',required=False,default="5.0")
 ap.add_argument('-a','--all',help='Send every command and get responses',required=False,default=False,action='store_true')
-ap.add_argument('-e','--echo',help='Send every command and get responses',required=False,default=False,action='store_true')
+ap.add_argument('-e','--echo',help='print everything',required=False,default=False,action='store_true')
+ap.add_argument('-te','--test_environment',help='Import relative, used in test environment',required=False,default=False,action='store_true')
 
 clargs = ap.parse_args(sys.argv[1:])
+
+if clargs.test_environment:
+	from picoxface import *
+else:
+	from anemometer.picoxface import *
 
 sock = socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
 

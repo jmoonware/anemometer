@@ -35,6 +35,7 @@ class pcn(Enum):
 	PCOMMAND_READ_BME_VALS = auto()
 	PCOMMAND_READ_WIND_VALS = auto()
 	PCOMMAND_READ_BOARD_T  = auto()
+	PCOMMAND_READ_LAST_ERR  = auto()
 	PCOMMAND_NUM_READ_COMMANDS = auto()
 	PCOMMAND_SET_ISR_LOW_COUNT = auto()
 	PCOMMAND_SET_ISR_HIGH_COUNT = auto()
@@ -119,6 +120,11 @@ pico_commands = {
   str(pcn.PCOMMAND_READ_BOARD_T):{'val':pcn.PCOMMAND_READ_BOARD_T.value,'responses':
 	[
 		ResponseElement("board_T_C", 2,scale=10),
+	],
+	'default_payload':bytearray()},
+  str(pcn.PCOMMAND_READ_LAST_ERR):{'val':pcn.PCOMMAND_READ_LAST_ERR.value,'responses':
+	[
+		ResponseElement("last_err", 2),
 	],
 	'default_payload':bytearray()},
   str(pcn.PCOMMAND_NUM_READ_COMMANDS):{'val':pcn.PCOMMAND_NUM_READ_COMMANDS.value,'responses':
