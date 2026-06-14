@@ -36,13 +36,15 @@ class pcn(Enum):
 	PCOMMAND_READ_WIND_VALS = auto()
 	PCOMMAND_READ_BOARD_T  = auto()
 	PCOMMAND_READ_LAST_ERR  = auto()
+	PCOMMAND_READ_BME2_VALS  = auto()
 	PCOMMAND_NUM_READ_COMMANDS = auto()
 	PCOMMAND_SET_ISR_LOW_COUNT = auto()
 	PCOMMAND_SET_ISR_HIGH_COUNT = auto()
-	PCOMMAND_SET_DAC_LEVEL  = auto()
+	PCOMMAND_SET_DAC_LEVEL  = auto() # 0-1024 is 0-3.3 V 
 	PCOMMAND_SET_MOTOR_POSITION = auto()
 	PCOMMAND_SET_BACKLIGHT_LEVEL = auto()
 	PCOMMAND_SET_THP_UPDATE_TIME = auto()
+	PCOMMAND_REBOOT = auto()
 	def __str__(self):
 		return(self.name)	
 
@@ -127,6 +129,13 @@ pico_commands = {
 		ResponseElement("last_err", 2),
 	],
 	'default_payload':bytearray()},
+  str(pcn.PCOMMAND_READ_BME2_VALS):{'val':pcn.PCOMMAND_READ_BME2_VALS.value,'responses':
+	[
+		ResponseElement(str(response_pico_thp.bme_T_C), 2,scale=10,signed=True),
+		ResponseElement(str(response_pico_thp.bme_H_perc), 2,scale=10),
+		ResponseElement(str(response_pico_thp.bme_P_inHg), 2,scale=100),
+	],
+	'default_payload':bytearray()},
   str(pcn.PCOMMAND_NUM_READ_COMMANDS):{'val':pcn.PCOMMAND_NUM_READ_COMMANDS.value,'responses':
 	[
 	
@@ -162,6 +171,11 @@ pico_commands = {
 		ResponseElement("sent_thp_update_time_s", 2),
 	],
 	'default_payload':bytearray([50,0])},
+  str(pcn.PCOMMAND_REBOOT):{'val':pcn.PCOMMAND_REBOOT.value,'responses':
+	[
+		ResponseElement("reboot_response", 2),
+	],
+	'default_payload':bytearray([0,0])},
 }
 
 ACK = 0x06

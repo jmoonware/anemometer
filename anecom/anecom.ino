@@ -32,7 +32,7 @@ IPAddress static_subnet(255,255,255,0);
 #include "src/windcal.h"
 
 #define VERSION_STRLEN 9
-char version[] = "202605261";
+char version[] = "202606071";
 
 // Backlight update = 133 MHz/(255*2360) = 221 Hz
 #define BACKLIGHT_DIV 255
@@ -247,10 +247,14 @@ void pwmIrqHandler() {
 static float last_board_T = -999;
 
 Adafruit_BME280 theBME280; // = Adafruit_BME280();
+Adafruit_BME280 theBME280_2; // = Adafruit_BME280();
 static float last_bme280_temperature=0;
 static float last_bme280_humidity=0;
 static float last_bme_280_pressure=0;
 
+static float last_bme280_temperature_2=0;
+static float last_bme280_humidity_2=0;
+static float last_bme_280_pressure_2=0;
 
 void read_bme280() 
 {
@@ -263,6 +267,12 @@ void read_bme280()
     last_bme280_temperature = theBME280.readTemperature();
     last_bme280_humidity = theBME280.readHumidity();
     last_bme_280_pressure = theBME280.readPressure();
+  }
+
+  if(theBME280_2.takeForcedMeasurement()) {
+    last_bme280_temperature_2 = theBME280_2.readTemperature();
+    last_bme280_humidity_2 = theBME280_2.readHumidity();
+    last_bme_280_pressure_2 = theBME280_2.readPressure();
   }
 
 }
@@ -699,17 +709,11 @@ void setup() {
   unsigned bme_status = theBME280.begin(0x76,&theWire);
   tft.println("BME280 status = "+String(bme_status));
   delay(1000);
-  if (!bme_status) {
-    bme_status = theBME280.begin(0x77,&theWire);
-    tft.println("BME280 status = "+String(bme_status));
-    delay(1000);
-  }
-  if(!bme_status) {
+  if(!bme_status) { // try a second time
     bme_status = theBME280.begin(0x76,&theWire);
     tft.println("BME280 status = "+String(bme_status));
     delay(1000);
   }
-
   // set to forced mode or indicate error
   if (bme_status) {
     theBME280.setSampling(Adafruit_BME280::sensor_mode::MODE_FORCED,Adafruit_BME280::SAMPLING_X1,Adafruit_BME280::SAMPLING_X1,Adafruit_BME280::SAMPLING_X1);
@@ -717,6 +721,23 @@ void setup() {
   else {
     gizmo_error_reg |= ERROR_BMEA_INIT;
   }
+
+  bme_status = theBME280_2.begin(0x77,&theWire);
+  tft.println("BME280-2 status = "+String(bme_status));
+  delay(1000);
+  if(!bme_status) { // try a second time
+    bme_status = theBME280_2.begin(0x77,&theWire);
+    tft.println("BME280-2 status = "+String(bme_status));
+    delay(1000);
+  } 
+  // set to forced mode or indicate error
+  if (bme_status) {
+    theBME280_2.setSampling(Adafruit_BME280::sensor_mode::MODE_FORCED,Adafruit_BME280::SAMPLING_X1,Adafruit_BME280::SAMPLING_X1,Adafruit_BME280::SAMPLING_X1);
+  }
+  else {
+    gizmo_error_reg |= ERROR_BMEB_INIT;
+  }
+
 
 
   // x0,x1,y0,y1,ctl = [bits from LSB: 1=rotate,2=invertx,3=inverty]
@@ -834,13 +855,15 @@ enum PACKET_COMMANDS {
   PCOMMAND_READ_WIND_VALS,
   PCOMMAND_READ_BOARD_T, 
   PCOMMAND_READ_LAST_ERR, 
+  PCOMMAND_READ_BME2_VALS, 
   PCOMMAND_NUM_READ_COMMANDS,
   PCOMMAND_SET_ISR_LOW_COUNT,
   PCOMMAND_SET_ISR_HIGH_COUNT,
   PCOMMAND_SET_DAC_LEVEL, 
   PCOMMAND_SET_MOTOR_POSITION,
   PCOMMAND_SET_BACKLIGHT_LEVEL,
-  PCOMMAND_SET_THP_UPDATE_TIME
+  PCOMMAND_SET_THP_UPDATE_TIME,
+  PCOMMAND_REBOOT,
 };
 
 enum PACKET_ERRORS {
@@ -848,7 +871,8 @@ enum PACKET_ERRORS {
   PERR_UNK_COMMAND,
   PERR_CHECKSUM,
   PERR_NO_ACK,
-  PERR_COUNT_RANGE
+  PERR_COUNT_RANGE,
+  PERR_REBOOT_ZERO,
 };
 
 #define ACK_BYTE 0x06
@@ -991,6 +1015,21 @@ void parsePacket(AsyncUDPPacket packet) {
           checksum_packet(outgoing_packet_buf, outgoing_data_len);
           break;
         }
+        case PCOMMAND_READ_BME2_VALS:
+        {
+          int16_t scaled_T = (int16_t)(last_bme280_temperature_2*10);
+          outgoing_packet_buf[2]=(uint8_t)(scaled_T&255);
+          outgoing_packet_buf[3]=(uint8_t)((scaled_T>>8)&255);
+          int16_t scaled_H = (int16_t)(last_bme280_humidity_2*10);
+          outgoing_packet_buf[4]=(uint8_t)(scaled_H&255);
+          outgoing_packet_buf[5]=(uint8_t)((scaled_H>>8)&255);
+          int16_t scaled_P = (int16_t)(0.1*last_bme_280_pressure_2/3.387); // 100x inHg vals
+          outgoing_packet_buf[6]=(uint8_t)(scaled_P&255);
+          outgoing_packet_buf[7]=(uint8_t)((scaled_P>>8)&255);
+          outgoing_data_len=10;
+          checksum_packet(outgoing_packet_buf, outgoing_data_len);
+          break;
+        }
         case PCOMMAND_SET_ISR_LOW_COUNT:
         {
           uint16_t tcount = (uint16_t)incoming_packet_buf[2]+(((uint16_t)incoming_packet_buf[3])<<8);
@@ -1087,7 +1126,19 @@ void parsePacket(AsyncUDPPacket packet) {
           else last_packet_error = PERR_COUNT_RANGE; 
           break;
         }
-
+        case PCOMMAND_REBOOT:
+        {
+          uint16_t tcount = (uint16_t)incoming_packet_buf[2]+(((uint16_t)incoming_packet_buf[3])<<8);
+          outgoing_packet_buf[2]=(uint8_t)(tcount&255);
+          outgoing_packet_buf[3]=(uint8_t)((tcount>>8)&255);
+          outgoing_data_len=6;
+          checksum_packet(outgoing_packet_buf, outgoing_data_len);
+          if (tcount > 0) { // any non-zero value reboots
+            watchdog_reboot(0,0,100) ; // enough delay to send ack packet, probably 
+          }
+          else last_packet_error = PERR_REBOOT_ZERO; 
+          break;
+        }
         default:
         {
           last_packet_error = PERR_UNK_COMMAND;
