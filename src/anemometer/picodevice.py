@@ -17,6 +17,8 @@ class PicoDevice():
 		return(self.Command(str(pcn.PCOMMAND_READ_WIND_VALS),expected_response=response_pico_wind))
 	def ReadTHP(self):
 		return(self.Command(str(pcn.PCOMMAND_READ_BME_VALS),expected_response=response_pico_thp))
+	def ReadTHP2(self): # the second BME device, on I2C 0x77
+		return(self.Command(str(pcn.PCOMMAND_READ_BME2_VALS),expected_response=response_pico_thp))
 	def Status(self):
 		return(self.Command(str(pcn.PCOMMAND_STATUS),expected_response=response_pico_status))
 	def Command(self,command_key,command_value=None,expected_response=None):

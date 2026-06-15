@@ -454,12 +454,14 @@ int64_t confirmEdgeLow(alarm_id_t id, void *user_data) {
     }
     last_rotor_millis = rotor_isr_now;
   
-    rotor_debounce_buffer[debounce_buf_idx] = last_rotor_interrupt_delta;
-    debounce_buf_idx+=1;
-    if (debounce_buf_idx >= ROTOR_DEBOUNCE_BUFLEN) {
-      debounce_buf_idx = 0; //reset
-    }
-    calc_trimmed_mean(rotor_debounce_buffer, ROTOR_DEBOUNCE_BUFLEN, &last_rotor_trimmed_mean, &last_rotor_trimmed_mad);
+//    rotor_debounce_buffer[debounce_buf_idx] = last_rotor_interrupt_delta;
+//    debounce_buf_idx+=1;
+//    if (debounce_buf_idx >= ROTOR_DEBOUNCE_BUFLEN) {
+//      debounce_buf_idx = 0; //reset
+//    }
+//    calc_trimmed_mean(rotor_debounce_buffer, ROTOR_DEBOUNCE_BUFLEN, &last_rotor_trimmed_mean, &last_rotor_trimmed_mad);
+    last_rotor_trimmed_mean = last_rotor_interrupt_delta;
+    last_rotor_trimmed_mad = 0;
     // the untrimmed latest value
     if (last_rotor_interrupt_delta > 0) {
       last_wind_velocity = ((float)2250)/last_rotor_interrupt_delta;
@@ -1266,15 +1268,16 @@ void loop() {
       float rotor_now = millis();
       if (rotor_now - last_rotor_millis > rotor_timeout) {
         // briefly disable interrupts
-          noInterrupts();
+//          noInterrupts();
           last_rotor_millis = rotor_now;
-          last_rotor_trimmed_mean = 0;
+          last_rotor_trimmed_mean = 1e6;
           last_rotor_trimmed_mad = 0;
-          timeout_rotor_debounce_buffer();
+// Comment out MAD outlier code for now
+//          timeout_rotor_debounce_buffer();
 //        setting to 0 is not right - the next value could be very small and outlier trimming will 
 //        provide a perfectly valid very small interrpt time, leading to spurious high velocity readings
 //          memset(rotor_debounce_buffer,0,sizeof(float)*ROTOR_DEBOUNCE_BUFLEN);
-          interrupts();
+//          interrupts();
           data_canvases[WINDV_CANVAS]->printf("0.0 *");
       }
       else if (last_rotor_trimmed_mean > 0) {
