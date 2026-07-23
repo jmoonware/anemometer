@@ -32,7 +32,7 @@ IPAddress static_subnet(255,255,255,0);
 #include "src/windcal.h"
 
 #define VERSION_STRLEN 9
-char version[] = "202606071";
+char version[] = "202607221";
 
 // Backlight update = 133 MHz/(255*2360) = 221 Hz
 #define BACKLIGHT_DIV 255
@@ -460,6 +460,7 @@ int64_t confirmEdgeLow(alarm_id_t id, void *user_data) {
 //      debounce_buf_idx = 0; //reset
 //    }
 //    calc_trimmed_mean(rotor_debounce_buffer, ROTOR_DEBOUNCE_BUFLEN, &last_rotor_trimmed_mean, &last_rotor_trimmed_mad);
+// TURN OFF TRIMMED MEAN FOR NOW
     last_rotor_trimmed_mean = last_rotor_interrupt_delta;
     last_rotor_trimmed_mad = 0;
     // the untrimmed latest value
@@ -1223,7 +1224,32 @@ void loop() {
       if (bme_update_millis >= bme_update_delay) {
         read_bme280();
         bme_update_millis=0;
+
+        data_canvases[T_CANVAS]->fillScreen(TFT_BLACK);
+        data_canvases[T_CANVAS]->setFont(&FreeMonoBold18pt7b);
+        data_canvases[T_CANVAS]->setCursor(15, LABEL_OFFSET);
+        data_canvases[T_CANVAS]->printf("%.1f" ,(9*last_bme280_temperature/5)+32);
+
+        data_canvases[H_CANVAS]->fillScreen(TFT_BLACK);
+        data_canvases[H_CANVAS]->setFont(&FreeMonoBold18pt7b);
+        data_canvases[H_CANVAS]->setCursor(15, LABEL_OFFSET);
+        data_canvases[H_CANVAS]->printf("%.1f" ,last_bme280_humidity);
+
+        data_canvases[P_CANVAS]->fillScreen(TFT_BLACK);
+        data_canvases[P_CANVAS]->setFont(&FreeMonoBold18pt7b);
+        data_canvases[P_CANVAS]->setCursor(15, LABEL_OFFSET);
+        data_canvases[P_CANVAS]->printf("%.2f",0.001*last_bme_280_pressure/3.387);
+
+        data_canvases[DATA_CANVAS]->fillScreen(TFT_BLACK);
+
+        for (int i=0; i < NUM_BITMAPS; ++i) {
+          if(i==T_CANVAS || i== H_CANVAS || i== P_CANVAS || i==DATA_CANVAS) {
+            tft.drawBitmap(data_pos[i][0],data_pos[i][1],data_canvases[i]->getBuffer(),data_pos[i][2],data_pos[i][3],data_canvas_colors[i][0],data_canvas_colors[i][1]);
+          }
+        }
+
       }
+
 
        // update date/time first
       dtntp.get_date();
@@ -1236,26 +1262,10 @@ void loop() {
       data_canvases[DATE_CANVAS]->setFont(&FreeMonoBold18pt7b);
       data_canvases[DATE_CANVAS]->printf("%s",dtntp.time_cstring);
 
-      data_canvases[T_CANVAS]->fillScreen(TFT_BLACK);
-      data_canvases[T_CANVAS]->setFont(&FreeMonoBold18pt7b);
-      data_canvases[T_CANVAS]->setCursor(15, LABEL_OFFSET);
-      data_canvases[T_CANVAS]->printf("%.1f" ,(9*last_bme280_temperature/5)+32);
-
-      data_canvases[H_CANVAS]->fillScreen(TFT_BLACK);
-      data_canvases[H_CANVAS]->setFont(&FreeMonoBold18pt7b);
-      data_canvases[H_CANVAS]->setCursor(15, LABEL_OFFSET);
-      data_canvases[H_CANVAS]->printf("%.1f" ,last_bme280_humidity);
-
-      data_canvases[P_CANVAS]->fillScreen(TFT_BLACK);
-      data_canvases[P_CANVAS]->setFont(&FreeMonoBold18pt7b);
-      data_canvases[P_CANVAS]->setCursor(15, LABEL_OFFSET);
-      data_canvases[P_CANVAS]->printf("%.2f",0.001*last_bme_280_pressure/3.387);
-
       data_canvases[WINDA_CANVAS]->fillScreen(TFT_BLACK);
       data_canvases[WINDA_CANVAS]->setFont(&FreeMonoBold18pt7b);
       data_canvases[WINDA_CANVAS]->setCursor(5, LABEL_OFFSET);
       data_canvases[WINDA_CANVAS]->printf("%.0f %s",last_wind_angle, angle_dir);
-
 
       data_canvases[WINDV_CANVAS]->fillScreen(TFT_BLACK);
       data_canvases[WINDV_CANVAS]->setFont(&FreeMonoBold18pt7b);
@@ -1294,8 +1304,11 @@ void loop() {
 //      data_canvases[DATA_CANVAS]->setCursor(5, 40);
 //      data_canvases[DATA_CANVAS]->printf("%.1f %.3f",last_rotor_trimmed_mean, last_rotor_trimmed_mad);
 
+      // only update selected
       for (int i=0; i < NUM_BITMAPS; ++i) {
-          tft.drawBitmap(data_pos[i][0],data_pos[i][1],data_canvases[i]->getBuffer(),data_pos[i][2],data_pos[i][3],data_canvas_colors[i][0],data_canvas_colors[i][1]);
+          if(i==WINDA_CANVAS || i== WINDV_CANVAS || i== DATE_CANVAS) {
+            tft.drawBitmap(data_pos[i][0],data_pos[i][1],data_canvases[i]->getBuffer(),data_pos[i][2],data_pos[i][3],data_canvas_colors[i][0],data_canvas_colors[i][1]);
+          }
       }
 
       if (left_button.isPressed()) {
